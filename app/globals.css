@@ -1,0 +1,135 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0a0a0a;
+  color: #ffffff;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto,
+    "Helvetica Neue", Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+.flow-canvas {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.flow-world {
+  position: absolute;
+  inset: 0;
+  transform-origin: 0 0;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.flow-label {
+  position: absolute;
+  top: 18px;
+  left: 22px;
+  font-size: 13px;
+  letter-spacing: 0.05em;
+  color: rgba(255, 255, 255, 0.45);
+  pointer-events: none;
+  font-weight: 500;
+}
+
+.flow-hint {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  color: rgba(255, 255, 255, 0.75);
+  font-size: 14px;
+  line-height: 2;
+  pointer-events: none;
+  letter-spacing: 0.01em;
+}
+
+.flow-hint-main {
+  font-size: 15px;
+  color: rgba(255, 255, 255, 0.8);
+  margin-bottom: 4px;
+}
+
+.flow-hint-dim {
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 12px;
+}
+
+.flow-block {
+  position: absolute;
+  border: 1.5px solid rgba(255, 255, 255, 0.85);
+  border-radius: 6px;
+  background: transparent;
+  color: #ffffff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: grab;
+  pointer-events: auto;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+}
+
+.flow-block:hover {
+  border-color: #ffffff;
+}
+
+.flow-block.is-selected {
+  border-color: #ffffff;
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.16);
+}
+
+.flow-block.is-editing {
+  cursor: text;
+}
+
+.flow-block-text {
+  width: 100%;
+  padding: 8px 14px;
+  text-align: center;
+  outline: none;
+  color: #ffffff;
+  font-size: 14px;
+  line-height: 1.35;
+  white-space: pre-wrap;
+  word-break: break-word;
+  cursor: inherit;
+  caret-color: #ffffff;
+}
+
+.flow-handle {
+  position: absolute;
+  right: -7px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid rgba(255, 255, 255, 0.9);
+  background-color: #0a0a0a;
+  cursor: crosshair;
+  opacity: 0;
+  transition: opacity 0.12s ease, transform 0.12s ease;
+}
+
+.flow-block:hover .flow-handle,
+.flow-block.is-selected .flow-handle {
+  opacity: 1;
+}
+
+.flow-handle:hover {
+  transform: translateY(-50%) scale(1.2);
+  background-color: #ffffff;
+}
