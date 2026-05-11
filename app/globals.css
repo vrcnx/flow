@@ -143,20 +143,16 @@ body {
   flex-direction: column;
   gap: 2px;
   padding: 4px;
-  background: rgba(255, 255, 255, 0.025);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: #131313;
+  border: 1px solid rgba(255, 255, 255, 0.1);
   border-radius: 8px;
   z-index: 10;
-  opacity: 0.45;
-  transition: opacity 0.18s ease, background 0.18s ease, border-color 0.18s ease;
-  backdrop-filter: blur(6px);
-  -webkit-backdrop-filter: blur(6px);
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.35);
+  transition: border-color 0.18s ease;
 }
 
 .flow-toolbar:hover {
-  opacity: 1;
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.18);
 }
 
 .flow-toolbar-divider {

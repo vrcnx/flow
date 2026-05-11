@@ -310,13 +310,21 @@ export default function Canvas() {
     setView({ x: rect.width / 2, y: rect.height / 2, scale: 1 });
   };
 
-  const clearAll = () => {
-    if (docRef.current.blocks.length === 0 && docRef.current.edges.length === 0) return;
-    setDoc(EMPTY_DOC);
+  const newFlow = () => {
+    const empty =
+      docRef.current.blocks.length === 0 && docRef.current.edges.length === 0;
     setSelection(null);
     setEditingId(null);
     setSearch({ open: false, query: "", index: 0 });
-    commitHistory();
+    if (!empty) {
+      setDoc(EMPTY_DOC);
+      commitHistory();
+    }
+    const el = canvasRef.current;
+    if (el) {
+      const rect = el.getBoundingClientRect();
+      setView({ x: rect.width / 2, y: rect.height / 2, scale: 1 });
+    }
   };
 
   const commitText = (id: string, newText: string) => {
@@ -896,7 +904,7 @@ export default function Canvas() {
         }}
         onToggleManager={() => setManagerOpen((m) => !m)}
         managerOpen={managerOpen}
-        onClear={clearAll}
+        onNewFlow={newFlow}
       />
 
       {search.open && (
@@ -955,7 +963,7 @@ type ToolbarProps = {
   onSearch: () => void;
   onToggleManager: () => void;
   managerOpen: boolean;
-  onClear: () => void;
+  onNewFlow: () => void;
 };
 
 function Toolbar({
@@ -968,7 +976,7 @@ function Toolbar({
   onSearch,
   onToggleManager,
   managerOpen,
-  onClear,
+  onNewFlow,
 }: ToolbarProps) {
   return (
     <div
@@ -1016,12 +1024,12 @@ function Toolbar({
           <path d="M14 3v6h6" />
         </svg>
       </ToolbarButton>
-      <ToolbarButton tip="Clear canvas" onClick={onClear}>
+      <div className="flow-toolbar-divider" />
+      <ToolbarButton tip="New flow" onClick={onNewFlow}>
         <svg viewBox="0 0 24 24" aria-hidden>
-          <path d="M4 7h16" />
-          <path d="M10 11v6M14 11v6" />
-          <path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" />
-          <path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" />
+          <path d="M5 4a1 1 0 0 1 1-1h7l4 4v12a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4z" />
+          <path d="M13 3v4h4" />
+          <path d="M9 14h6M12 11v6" />
         </svg>
       </ToolbarButton>
     </div>
