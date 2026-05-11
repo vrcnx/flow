@@ -11,6 +11,7 @@ type HandlerBag = {
   move?: (e: MouseEvent) => void;
   up?: (e: MouseEvent) => void;
   key?: (e: KeyboardEvent) => void;
+  ctx?: (e: MouseEvent) => void;
 };
 
 declare global {
@@ -28,22 +29,38 @@ type Block = {
   h: number;
   text: string;
 };
+type Title = {
+  id: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  text: string;
+};
 type Edge = { id: string; from: string; to: string };
-type Doc = { blocks: Block[]; edges: Edge[] };
+type Doc = { blocks: Block[]; edges: Edge[]; titles: Title[] };
 type View = { x: number; y: number; scale: number };
-type Selection = { type: "block" | "edge"; id: string } | null;
+type Selection = { type: "block" | "edge" | "title"; id: string } | null;
 type SearchState = { open: boolean; query: string; index: number };
+
+type MenuItem =
+  | { kind: "action"; label: string; shortcut?: string; destructive?: boolean; onClick: () => void; disabled?: boolean }
+  | { kind: "divider" };
+
+type ContextMenuState = { x: number; y: number; items: MenuItem[] } | null;
 
 const GRID = 24;
 const BLOCK_W = 168; // 7 grid cells
 const BLOCK_H = 72; // 3 grid cells
+const TITLE_W = 240; // 10 grid cells
+const TITLE_H = 48; // 2 grid cells
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 3;
 const HISTORY_LIMIT = 200;
 const STORAGE_CURRENT = "flow:current";
 const STORAGE_SNAPSHOTS = "flow:snapshots";
 
-const EMPTY_DOC: Doc = { blocks: [], edges: [] };
+const EMPTY_DOC: Doc = { blocks: [], edges: [], titles: [] };
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
@@ -61,16 +78,18 @@ function edgePath(x1: number, y1: number, x2: number, y2: number) {
 function isExternalInputFocused() {
   const ae = document.activeElement;
   if (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement) return true;
-  // Treat block contentEditable separately from save manager / search input
-  if (ae instanceof HTMLElement && ae.isContentEditable) return false;
   return false;
 }
 
 function looseDocValidate(value: unknown): Doc | null {
   if (!value || typeof value !== "object") return null;
-  const v = value as { blocks?: unknown; edges?: unknown };
+  const v = value as { blocks?: unknown; edges?: unknown; titles?: unknown };
   if (!Array.isArray(v.blocks) || !Array.isArray(v.edges)) return null;
-  return { blocks: v.blocks as Block[], edges: v.edges as Edge[] };
+  return {
+    blocks: v.blocks as Block[],
+    edges: v.edges as Edge[],
+    titles: Array.isArray(v.titles) ? (v.titles as Title[]) : [],
+  };
 }
 
 type Interaction =
@@ -84,11 +103,12 @@ type Interaction =
     }
   | {
       type: "drag";
+      kind: "block" | "title";
       id: string;
       startMouseX: number;
       startMouseY: number;
-      startBlockX: number;
-      startBlockY: number;
+      startX: number;
+      startY: number;
       moved: boolean;
     }
   | {
@@ -112,10 +132,12 @@ export default function Canvas() {
   const [search, setSearch] = useState<SearchState>({ open: false, query: "", index: 0 });
   const [managerOpen, setManagerOpen] = useState(false);
   const [snapshots, setSnapshots] = useState<Record<string, Doc>>({});
+  const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
   const [, setTick] = useState(0);
 
   const blocks = doc.blocks;
   const edges = doc.edges;
+  const titles = doc.titles;
 
   const canvasRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -152,6 +174,13 @@ export default function Canvas() {
     setDoc((d) => ({
       ...d,
       edges: typeof updater === "function" ? updater(d.edges) : updater,
+    }));
+  };
+
+  const setTitles = (updater: Title[] | ((ts: Title[]) => Title[])) => {
+    setDoc((d) => ({
+      ...d,
+      titles: typeof updater === "function" ? updater(d.titles) : updater,
     }));
   };
 
@@ -203,6 +232,13 @@ export default function Canvas() {
     return { x: (sx - v.x) / v.scale, y: (sy - v.y) / v.scale };
   };
 
+  const eventToWorld = (e: { clientX: number; clientY: number }) => {
+    const el = canvasRef.current;
+    if (!el) return { x: 0, y: 0 };
+    const rect = el.getBoundingClientRect();
+    return screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+  };
+
   // Initial mount: center view, then load saved state from localStorage.
   useEffect(() => {
     if (canvasRef.current) {
@@ -219,7 +255,7 @@ export default function Canvas() {
         }
       }
     } catch {
-      // ignore corrupted storage
+      // ignore
     }
     try {
       const raw = localStorage.getItem(STORAGE_SNAPSHOTS);
@@ -247,7 +283,7 @@ export default function Canvas() {
       try {
         localStorage.setItem(STORAGE_CURRENT, JSON.stringify(doc));
       } catch {
-        // quota full / private mode; nothing to do
+        // ignore
       }
     }, 250);
     return () => window.clearTimeout(id);
@@ -263,12 +299,25 @@ export default function Canvas() {
     }
   }, [snapshots]);
 
+  // ───────────────  Creation / mutation helpers  ───────────────
+
   const createBlockAtWorld = (wx: number, wy: number, focus: boolean) => {
     const id = uid();
     const x = snap(wx - BLOCK_W / 2);
     const y = snap(wy - BLOCK_H / 2);
     setBlocks((bs) => [...bs, { id, x, y, w: BLOCK_W, h: BLOCK_H, text: "" }]);
     setSelection({ type: "block", id });
+    if (focus) setEditingId(id);
+    commitHistory();
+    return id;
+  };
+
+  const createTitleAtWorld = (wx: number, wy: number, focus: boolean) => {
+    const id = uid();
+    const x = snap(wx - TITLE_W / 2);
+    const y = snap(wy - TITLE_H / 2);
+    setTitles((ts) => [...ts, { id, x, y, w: TITLE_W, h: TITLE_H, text: "" }]);
+    setSelection({ type: "title", id });
     if (focus) setEditingId(id);
     commitHistory();
     return id;
@@ -295,6 +344,45 @@ export default function Canvas() {
     commitHistory();
   };
 
+  const duplicateBlock = (block: Block) => {
+    const id = uid();
+    const x = snap(block.x + GRID * 2);
+    const y = snap(block.y + GRID * 2);
+    setBlocks((bs) => [...bs, { id, x, y, w: block.w, h: block.h, text: block.text }]);
+    setSelection({ type: "block", id });
+    commitHistory();
+  };
+
+  const duplicateTitle = (title: Title) => {
+    const id = uid();
+    const x = snap(title.x + GRID * 2);
+    const y = snap(title.y + GRID * 2);
+    setTitles((ts) => [...ts, { id, x, y, w: title.w, h: title.h, text: title.text }]);
+    setSelection({ type: "title", id });
+    commitHistory();
+  };
+
+  const deleteBlock = (id: string) => {
+    setBlocks((bs) => bs.filter((b) => b.id !== id));
+    setEdges((es) => es.filter((ed) => ed.from !== id && ed.to !== id));
+    setSelection((s) => (s?.type === "block" && s.id === id ? null : s));
+    setEditingId((e) => (e === id ? null : e));
+    commitHistory();
+  };
+
+  const deleteTitle = (id: string) => {
+    setTitles((ts) => ts.filter((t) => t.id !== id));
+    setSelection((s) => (s?.type === "title" && s.id === id ? null : s));
+    setEditingId((e) => (e === id ? null : e));
+    commitHistory();
+  };
+
+  const deleteEdge = (id: string) => {
+    setEdges((es) => es.filter((ed) => ed.id !== id));
+    setSelection((s) => (s?.type === "edge" && s.id === id ? null : s));
+    commitHistory();
+  };
+
   const addBlockAtCenter = () => {
     const el = canvasRef.current;
     if (!el) return;
@@ -312,10 +400,13 @@ export default function Canvas() {
 
   const newFlow = () => {
     const empty =
-      docRef.current.blocks.length === 0 && docRef.current.edges.length === 0;
+      docRef.current.blocks.length === 0 &&
+      docRef.current.edges.length === 0 &&
+      docRef.current.titles.length === 0;
     setSelection(null);
     setEditingId(null);
     setSearch({ open: false, query: "", index: 0 });
+    setContextMenu(null);
     if (!empty) {
       setDoc(EMPTY_DOC);
       commitHistory();
@@ -328,15 +419,35 @@ export default function Canvas() {
   };
 
   const commitText = (id: string, newText: string) => {
-    const cur = docRef.current.blocks.find((b) => b.id === id);
-    if (!cur || cur.text === newText) return;
-    setBlocks((bs) =>
-      bs.map((b) => (b.id === id ? { ...b, text: newText } : b))
-    );
-    commitHistory();
+    const b = docRef.current.blocks.find((x) => x.id === id);
+    if (b) {
+      if (b.text !== newText) {
+        setBlocks((bs) =>
+          bs.map((x) => (x.id === id ? { ...x, text: newText } : x))
+        );
+        commitHistory();
+      }
+      return;
+    }
+    const t = docRef.current.titles.find((x) => x.id === id);
+    if (t) {
+      const trimmed = newText.trim();
+      if (trimmed === "" && t.text.trim() === "") {
+        // brand-new empty title that the user dismissed — discard it
+        setTitles((ts) => ts.filter((x) => x.id !== id));
+        commitHistory();
+        return;
+      }
+      if (t.text !== newText) {
+        setTitles((ts) =>
+          ts.map((x) => (x.id === id ? { ...x, text: newText } : x))
+        );
+        commitHistory();
+      }
+    }
   };
 
-  // Tab navigation between cards
+  // Tab navigation only walks blocks (titles are floating labels).
   const navigateBlocks = (reverse: boolean) => {
     const wasEditing = !!editingIdRef.current;
     const sel = selectionRef.current;
@@ -361,24 +472,26 @@ export default function Canvas() {
     centerOn(next);
   };
 
-  const centerOn = (block: Block) => {
+  const centerOn = (rect: { x: number; y: number; w: number; h: number }) => {
     const el = canvasRef.current;
     if (!el) return;
-    const rect = el.getBoundingClientRect();
+    const r = el.getBoundingClientRect();
     const v = viewRef.current;
     setView({
       scale: v.scale,
-      x: rect.width / 2 - (block.x + block.w / 2) * v.scale,
-      y: rect.height / 2 - (block.y + block.h / 2) * v.scale,
+      x: r.width / 2 - (rect.x + rect.w / 2) * v.scale,
+      y: r.height / 2 - (rect.y + rect.h / 2) * v.scale,
     });
   };
 
-  // Search matches and pan-to-match
+  // Search across both blocks and titles
   const matches = useMemo(() => {
-    if (!search.open || !search.query.trim()) return [] as Block[];
+    if (!search.open || !search.query.trim()) return [] as Array<Block | Title>;
     const q = search.query.toLowerCase();
-    return blocks.filter((b) => b.text.toLowerCase().includes(q));
-  }, [search.open, search.query, blocks]);
+    const blockHits = blocks.filter((b) => b.text.toLowerCase().includes(q));
+    const titleHits = titles.filter((t) => t.text.toLowerCase().includes(q));
+    return [...blockHits, ...titleHits];
+  }, [search.open, search.query, blocks, titles]);
 
   const matchedIds = useMemo(() => new Set(matches.map((m) => m.id)), [matches]);
   const currentMatch = matches.length > 0
@@ -391,7 +504,8 @@ export default function Canvas() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentMatch?.id]);
 
-  // Save manager actions
+  // ───────────────  Save manager actions  ───────────────
+
   const saveSnapshot = (rawName: string) => {
     const name = rawName.trim();
     if (!name) return;
@@ -415,8 +529,159 @@ export default function Canvas() {
     });
   };
 
+  // ───────────────  Context menu  ───────────────
+
+  const positionMenu = (cx: number, cy: number, itemCount: number) => {
+    const menuWidth = 196;
+    const approxItemH = 30;
+    const padding = 8;
+    const menuHeight = itemCount * approxItemH + 8;
+    let x = cx;
+    let y = cy;
+    if (x + menuWidth + padding > window.innerWidth) x = Math.max(padding, x - menuWidth);
+    if (y + menuHeight + padding > window.innerHeight) y = Math.max(padding, y - menuHeight);
+    return { x, y };
+  };
+
+  const buildCanvasMenu = (worldX: number, worldY: number): MenuItem[] => [
+    {
+      kind: "action",
+      label: "New block",
+      onClick: () => createBlockAtWorld(worldX, worldY, true),
+    },
+    {
+      kind: "action",
+      label: "New title",
+      onClick: () => createTitleAtWorld(worldX, worldY, true),
+    },
+    { kind: "divider" },
+    {
+      kind: "action",
+      label: "Find…",
+      shortcut: "Ctrl+F",
+      onClick: () => {
+        setSearch((s) => ({ ...s, open: true }));
+        queueMicrotask(() => {
+          searchInputRef.current?.focus();
+          searchInputRef.current?.select();
+        });
+      },
+    },
+    { kind: "action", label: "Reset view", onClick: resetView },
+  ];
+
+  const buildBlockMenu = (block: Block): MenuItem[] => [
+    {
+      kind: "action",
+      label: "Edit text",
+      onClick: () => {
+        setSelection({ type: "block", id: block.id });
+        setEditingId(block.id);
+      },
+    },
+    { kind: "action", label: "Extend right", onClick: () => extendFrom(block) },
+    { kind: "action", label: "Duplicate", onClick: () => duplicateBlock(block) },
+    { kind: "divider" },
+    {
+      kind: "action",
+      label: "Delete",
+      shortcut: "Del",
+      destructive: true,
+      onClick: () => deleteBlock(block.id),
+    },
+  ];
+
+  const buildTitleMenu = (title: Title): MenuItem[] => [
+    {
+      kind: "action",
+      label: "Edit text",
+      onClick: () => {
+        setSelection({ type: "title", id: title.id });
+        setEditingId(title.id);
+      },
+    },
+    { kind: "action", label: "Duplicate", onClick: () => duplicateTitle(title) },
+    { kind: "divider" },
+    {
+      kind: "action",
+      label: "Delete",
+      shortcut: "Del",
+      destructive: true,
+      onClick: () => deleteTitle(title.id),
+    },
+  ];
+
+  const buildEdgeMenu = (edge: Edge): MenuItem[] => [
+    {
+      kind: "action",
+      label: "Delete arrow",
+      shortcut: "Del",
+      destructive: true,
+      onClick: () => deleteEdge(edge.id),
+    },
+  ];
+
+  const openContextMenuForEvent = (e: MouseEvent) => {
+    if (!(e.target instanceof Element)) return;
+    if (e.target.closest(".flow-toolbar")) {
+      // suppress browser menu over toolbar but offer nothing custom
+      return;
+    }
+    if (e.target.closest(".flow-search") || e.target.closest(".flow-manager") || e.target.closest(".flow-context-menu")) {
+      // let inputs have their native menu for paste etc.
+      e.stopPropagation();
+      return;
+    }
+    if (!e.target.closest(".flow-canvas")) return;
+
+    let items: MenuItem[] | null = null;
+
+    const blockEl = e.target.closest('[data-node-kind="block"]') as HTMLElement | null;
+    const titleEl = e.target.closest('[data-node-kind="title"]') as HTMLElement | null;
+    const edgeId = e.target instanceof Element ? e.target.getAttribute("data-edge-id") : null;
+
+    if (blockEl) {
+      const id = blockEl.getAttribute("data-id") || "";
+      const block = docRef.current.blocks.find((b) => b.id === id);
+      if (block) {
+        items = buildBlockMenu(block);
+        setSelection({ type: "block", id });
+      }
+    } else if (titleEl) {
+      const id = titleEl.getAttribute("data-id") || "";
+      const title = docRef.current.titles.find((t) => t.id === id);
+      if (title) {
+        items = buildTitleMenu(title);
+        setSelection({ type: "title", id });
+      }
+    } else if (edgeId) {
+      const edge = docRef.current.edges.find((ed) => ed.id === edgeId);
+      if (edge) {
+        items = buildEdgeMenu(edge);
+        setSelection({ type: "edge", id: edge.id });
+      }
+    } else {
+      const w = eventToWorld(e);
+      items = buildCanvasMenu(w.x, w.y);
+    }
+
+    if (!items) return;
+    const { x, y } = positionMenu(e.clientX, e.clientY, items.length);
+    setContextMenu({ x, y, items });
+    setEditingId(null);
+  };
+
+  // ───────────────  Native event handlers  ───────────────
+
   const handlers: HandlerBag = {
     down: (e) => {
+      // Any mousedown outside the menu dismisses it.
+      if (contextMenu) {
+        const t = e.target;
+        if (!(t instanceof Element) || !t.closest(".flow-context-menu")) {
+          setContextMenu(null);
+        }
+      }
       const t = e.target;
       const isBg = t instanceof Element && t.classList.contains("flow-canvas");
       if (!isBg) return;
@@ -441,8 +706,7 @@ export default function Canvas() {
       if (document.activeElement instanceof HTMLElement) {
         document.activeElement.blur();
       }
-      const rect = el.getBoundingClientRect();
-      const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+      const w = eventToWorld(e);
       createBlockAtWorld(w.x, w.y, true);
       interactionRef.current = { type: "none" };
       setPanning(false);
@@ -454,7 +718,8 @@ export default function Canvas() {
         !!t.closest(".flow-canvas") &&
         !t.closest(".flow-toolbar") &&
         !t.closest(".flow-search") &&
-        !t.closest(".flow-manager");
+        !t.closest(".flow-manager") &&
+        !t.closest(".flow-context-menu");
       if (!onCanvas) return;
       e.preventDefault();
       const el = canvasRef.current;
@@ -486,9 +751,10 @@ export default function Canvas() {
         const scale = viewRef.current.scale;
         const dx = (e.clientX - s.startMouseX) / scale;
         const dy = (e.clientY - s.startMouseY) / scale;
-        const newX = snap(s.startBlockX + dx);
-        const newY = snap(s.startBlockY + dy);
-        const cur = docRef.current.blocks.find((b) => b.id === s.id);
+        const newX = snap(s.startX + dx);
+        const newY = snap(s.startY + dy);
+        const list = s.kind === "block" ? docRef.current.blocks : docRef.current.titles;
+        const cur = list.find((b) => b.id === s.id);
         if (!cur) return;
         if (cur.x === newX && cur.y === newY) {
           if (!s.moved && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
@@ -499,68 +765,67 @@ export default function Canvas() {
         if (!s.moved) {
           interactionRef.current = { ...s, moved: true };
         }
-        setBlocks((bs) =>
-          bs.map((b) => (b.id === s.id ? { ...b, x: newX, y: newY } : b))
-        );
+        if (s.kind === "block") {
+          setBlocks((bs) =>
+            bs.map((b) => (b.id === s.id ? { ...b, x: newX, y: newY } : b))
+          );
+        } else {
+          setTitles((ts) =>
+            ts.map((b) => (b.id === s.id ? { ...b, x: newX, y: newY } : b))
+          );
+        }
       } else if (s.type === "connect") {
-        const rect = canvasRef.current?.getBoundingClientRect();
-        if (!rect) return;
-        const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+        const w = eventToWorld(e);
         setConnectPreview({ from: s.from, worldX: w.x, worldY: w.y });
       }
     },
     up: (e) => {
       const s = interactionRef.current;
       if (s.type === "connect") {
-        const rect = canvasRef.current?.getBoundingClientRect();
         let changed = false;
         const fromId = s.from;
-        if (rect) {
-          const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
-          const target = docRef.current.blocks.find(
-            (b) =>
-              w.x >= b.x &&
-              w.x <= b.x + b.w &&
-              w.y >= b.y &&
-              w.y <= b.y + b.h &&
-              b.id !== fromId
-          );
-          if (target) {
-            setEdges((es) => {
-              if (es.some((ed) => ed.from === fromId && ed.to === target.id))
-                return es;
-              return [...es, { id: uid(), from: fromId, to: target.id }];
-            });
+        const w = eventToWorld(e);
+        const target = docRef.current.blocks.find(
+          (b) =>
+            w.x >= b.x &&
+            w.x <= b.x + b.w &&
+            w.y >= b.y &&
+            w.y <= b.y + b.h &&
+            b.id !== fromId
+        );
+        if (target) {
+          setEdges((es) => {
+            if (es.some((ed) => ed.from === fromId && ed.to === target.id))
+              return es;
+            return [...es, { id: uid(), from: fromId, to: target.id }];
+          });
+          changed = true;
+        } else {
+          const source = docRef.current.blocks.find((b) => b.id === fromId);
+          const overSource =
+            !!source &&
+            w.x >= source.x &&
+            w.x <= source.x + source.w &&
+            w.y >= source.y &&
+            w.y <= source.y + source.h;
+          const ddx = e.clientX - s.startMouseX;
+          const ddy = e.clientY - s.startMouseY;
+          const draggedEnough = ddx * ddx + ddy * ddy > 20 * 20;
+          if (source && !overSource && draggedEnough) {
+            const newId = uid();
+            const newX = snap(w.x - BLOCK_W / 2);
+            const newY = snap(w.y - BLOCK_H / 2);
+            setBlocks((bs) => [
+              ...bs,
+              { id: newId, x: newX, y: newY, w: BLOCK_W, h: BLOCK_H, text: "" },
+            ]);
+            setEdges((es) => [
+              ...es,
+              { id: uid(), from: fromId, to: newId },
+            ]);
+            setSelection({ type: "block", id: newId });
+            setEditingId(newId);
             changed = true;
-          } else {
-            // Drop on empty space → if the user actually dragged, spawn a
-            // new card at the drop location and wire it up.
-            const source = docRef.current.blocks.find((b) => b.id === fromId);
-            const overSource =
-              !!source &&
-              w.x >= source.x &&
-              w.x <= source.x + source.w &&
-              w.y >= source.y &&
-              w.y <= source.y + source.h;
-            const ddx = e.clientX - s.startMouseX;
-            const ddy = e.clientY - s.startMouseY;
-            const draggedEnough = ddx * ddx + ddy * ddy > 20 * 20;
-            if (source && !overSource && draggedEnough) {
-              const newId = uid();
-              const newX = snap(w.x - BLOCK_W / 2);
-              const newY = snap(w.y - BLOCK_H / 2);
-              setBlocks((bs) => [
-                ...bs,
-                { id: newId, x: newX, y: newY, w: BLOCK_W, h: BLOCK_H, text: "" },
-              ]);
-              setEdges((es) => [
-                ...es,
-                { id: uid(), from: fromId, to: newId },
-              ]);
-              setSelection({ type: "block", id: newId });
-              setEditingId(newId);
-              changed = true;
-            }
           }
         }
         setConnectPreview(null);
@@ -577,7 +842,6 @@ export default function Canvas() {
       const externalInput = isExternalInputFocused();
       const editingBlock = !!editingIdRef.current;
 
-      // Ctrl/Cmd+F: open the finder (always wins, even when editing)
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
         e.preventDefault();
         setSearch((s) => ({ ...s, open: true }));
@@ -588,22 +852,19 @@ export default function Canvas() {
         return;
       }
 
-      // Tab / Shift+Tab: navigate cards
       if (e.key === "Tab") {
-        if (externalInput) return; // browser handles tab inside search/manager inputs
+        if (externalInput) return;
         e.preventDefault();
         navigateBlocks(e.shiftKey);
         return;
       }
 
-      // Undo
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z") {
         if (editingBlock || externalInput) return;
         e.preventDefault();
         undo();
         return;
       }
-      // Redo
       if (
         ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z") ||
         ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y")
@@ -615,19 +876,17 @@ export default function Canvas() {
       }
 
       if (e.key === "Escape") {
-        if (search.open) {
-          setSearch({ open: false, query: "", index: 0 });
-        }
+        if (contextMenu) setContextMenu(null);
+        if (search.open) setSearch({ open: false, query: "", index: 0 });
         if (managerOpen) setManagerOpen(false);
         setEditingId(null);
         setSelection(null);
         return;
       }
 
-      // Enter on a selected block (not editing, not in input) → enter edit mode
       if (e.key === "Enter" && !editingBlock && !externalInput) {
         const sel = selectionRef.current;
-        if (sel?.type === "block") {
+        if (sel?.type === "block" || sel?.type === "title") {
           e.preventDefault();
           setEditingId(sel.id);
           return;
@@ -637,21 +896,19 @@ export default function Canvas() {
       if (editingBlock || externalInput) return;
       if (e.key === "Delete" || e.key === "Backspace") {
         const sel = selectionRef.current;
-        let changed = false;
-        if (sel?.type === "block") {
-          const id = sel.id;
-          setBlocks((bs) => bs.filter((b) => b.id !== id));
-          setEdges((es) => es.filter((ed) => ed.from !== id && ed.to !== id));
-          setSelection(null);
-          changed = true;
-        } else if (sel?.type === "edge") {
-          const id = sel.id;
-          setEdges((es) => es.filter((ed) => ed.id !== id));
-          setSelection(null);
-          changed = true;
-        }
-        if (changed) commitHistory();
+        if (sel?.type === "block") deleteBlock(sel.id);
+        else if (sel?.type === "title") deleteTitle(sel.id);
+        else if (sel?.type === "edge") deleteEdge(sel.id);
       }
+    },
+    ctx: (e) => {
+      if (!(e.target instanceof Element)) return;
+      if (e.target.closest(".flow-search") || e.target.closest(".flow-manager") || e.target.closest(".flow-context-menu")) {
+        // Allow native menu inside inputs and inside our menu itself
+        return;
+      }
+      e.preventDefault();
+      openContextMenuForEvent(e);
     },
   };
 
@@ -668,10 +925,13 @@ export default function Canvas() {
     document.addEventListener("mousedown", proxy("down"));
     document.addEventListener("dblclick", proxy("dbl"));
     document.addEventListener("wheel", proxy("wheel"), { passive: false });
+    document.addEventListener("contextmenu", proxy("ctx"));
     window.addEventListener("mousemove", proxy("move"));
     window.addEventListener("mouseup", proxy("up"));
     window.addEventListener("keydown", proxy("key"));
   }, []);
+
+  // ───────────────  React-side per-node handlers  ───────────────
 
   const startBlockDrag = (e: React.MouseEvent, block: Block) => {
     if (editingId === block.id) return;
@@ -679,18 +939,40 @@ export default function Canvas() {
     setSelection({ type: "block", id: block.id });
     interactionRef.current = {
       type: "drag",
+      kind: "block",
       id: block.id,
       startMouseX: e.clientX,
       startMouseY: e.clientY,
-      startBlockX: block.x,
-      startBlockY: block.y,
+      startX: block.x,
+      startY: block.y,
       moved: false,
     };
   };
 
-  const startEditing = (block: Block) => {
+  const startTitleDrag = (e: React.MouseEvent, title: Title) => {
+    if (editingId === title.id) return;
+    e.stopPropagation();
+    setSelection({ type: "title", id: title.id });
+    interactionRef.current = {
+      type: "drag",
+      kind: "title",
+      id: title.id,
+      startMouseX: e.clientX,
+      startMouseY: e.clientY,
+      startX: title.x,
+      startY: title.y,
+      moved: false,
+    };
+  };
+
+  const startEditingBlock = (block: Block) => {
     setSelection({ type: "block", id: block.id });
     setEditingId(block.id);
+  };
+
+  const startEditingTitle = (title: Title) => {
+    setSelection({ type: "title", id: title.id });
+    setEditingId(title.id);
   };
 
   const startConnect = (e: React.MouseEvent, block: Block) => {
@@ -765,7 +1047,7 @@ export default function Canvas() {
               selection?.type === "edge" && selection.id === edge.id;
             const d = edgePath(x1, y1, x2, y2);
             return (
-              <g key={edge.id}>
+              <g key={edge.id} data-edge-id={edge.id}>
                 <path
                   d={d}
                   stroke="transparent"
@@ -773,6 +1055,7 @@ export default function Canvas() {
                   fill="none"
                   pointerEvents="stroke"
                   style={{ cursor: "pointer" }}
+                  data-edge-id={edge.id}
                   onMouseDown={(e) => selectEdge(e, edge)}
                 />
                 <path
@@ -861,6 +1144,27 @@ export default function Canvas() {
           transform: `translate(${view.x}px, ${view.y}px) scale(${view.scale})`,
         }}
       >
+        {titles.map((t) => (
+          <TitleView
+            key={t.id}
+            title={t}
+            selected={selection?.type === "title" && selection.id === t.id}
+            editing={editingId === t.id}
+            matched={matchedIds.has(t.id)}
+            isCurrentMatch={search.open && currentMatch?.id === t.id}
+            onStartDrag={(e) => startTitleDrag(e, t)}
+            onStartEdit={() => startEditingTitle(t)}
+            onTextChange={(nt) =>
+              setTitles((ts) =>
+                ts.map((x) => (x.id === t.id ? { ...x, text: nt } : x))
+              )
+            }
+            onTextBlur={(finalText) => {
+              setEditingId(null);
+              commitText(t.id, finalText);
+            }}
+          />
+        ))}
         {blocks.map((b) => (
           <BlockView
             key={b.id}
@@ -870,7 +1174,7 @@ export default function Canvas() {
             matched={matchedIds.has(b.id)}
             isCurrentMatch={search.open && currentMatch?.id === b.id}
             onStartDrag={(e) => startBlockDrag(e, b)}
-            onStartEdit={() => startEditing(b)}
+            onStartEdit={() => startEditingBlock(b)}
             onStartConnect={(e) => startConnect(e, b)}
             onExtend={() => extendFrom(b)}
             onTextChange={(t) =>
@@ -942,10 +1246,19 @@ export default function Canvas() {
         />
       )}
 
-      {blocks.length === 0 && !managerOpen && (
+      {contextMenu && (
+        <ContextMenu
+          x={contextMenu.x}
+          y={contextMenu.y}
+          items={contextMenu.items}
+          onClose={() => setContextMenu(null)}
+        />
+      )}
+
+      {blocks.length === 0 && titles.length === 0 && !managerOpen && (
         <div className="flow-hint">
           <div className="flow-hint-main">double-click anywhere to create a block</div>
-          <div className="flow-hint-dim">drag from a card&rsquo;s dot to connect &middot; drop on empty space for a new card</div>
+          <div className="flow-hint-dim">right-click for the menu &middot; drop a drag on empty space for a new card</div>
           <div className="flow-hint-dim">tab to navigate &middot; ctrl+f to find &middot; ctrl+z to undo</div>
         </div>
       )}
@@ -983,6 +1296,7 @@ function Toolbar({
       className="flow-toolbar"
       onMouseDown={(e) => e.stopPropagation()}
       onDoubleClick={(e) => e.stopPropagation()}
+      onContextMenu={(e) => e.preventDefault()}
     >
       <ToolbarButton tip="Undo (Ctrl+Z)" disabled={!canUndo} onClick={onUndo}>
         <svg viewBox="0 0 24 24" aria-hidden>
@@ -1060,6 +1374,44 @@ function ToolbarButton({
   );
 }
 
+type ContextMenuProps = {
+  x: number;
+  y: number;
+  items: MenuItem[];
+  onClose: () => void;
+};
+
+function ContextMenu({ x, y, items, onClose }: ContextMenuProps) {
+  return (
+    <div
+      className="flow-context-menu"
+      style={{ left: x, top: y }}
+      onContextMenu={(e) => e.preventDefault()}
+    >
+      {items.map((item, i) => {
+        if (item.kind === "divider") {
+          return <div key={i} className="flow-context-divider" />;
+        }
+        return (
+          <button
+            key={i}
+            type="button"
+            className={`flow-context-item${item.destructive ? " is-destructive" : ""}`}
+            disabled={item.disabled}
+            onClick={() => {
+              item.onClick();
+              onClose();
+            }}
+          >
+            <span className="flow-context-label">{item.label}</span>
+            {item.shortcut && <span className="flow-context-shortcut">{item.shortcut}</span>}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 type SearchBarProps = {
   inputRef: React.RefObject<HTMLInputElement | null>;
   query: string;
@@ -1095,7 +1447,7 @@ function SearchBar({
         ref={inputRef}
         className="flow-search-input"
         value={query}
-        placeholder="Find a card&hellip;"
+        placeholder="Find a card or title&hellip;"
         spellCheck={false}
         autoComplete="off"
         onChange={(e) => onChange(e.target.value)}
@@ -1324,6 +1676,8 @@ function BlockView({
   return (
     <div
       ref={wrapRef}
+      data-node-kind="block"
+      data-id={block.id}
       className={`flow-block${selected ? " is-selected" : ""}${
         editing ? " is-editing" : ""
       }${matched ? " is-match" : ""}${isCurrentMatch ? " is-current-match" : ""}`}
@@ -1358,6 +1712,104 @@ function BlockView({
         className="flow-handle"
         onMouseDown={onStartConnect}
         title="Drag to connect &middot; double-click to extend"
+      />
+    </div>
+  );
+}
+
+type TitleViewProps = {
+  title: Title;
+  selected: boolean;
+  editing: boolean;
+  matched: boolean;
+  isCurrentMatch: boolean;
+  onStartDrag: (e: React.MouseEvent) => void;
+  onStartEdit: () => void;
+  onTextChange: (t: string) => void;
+  onTextBlur: (finalText: string) => void;
+};
+
+function TitleView({
+  title,
+  selected,
+  editing,
+  matched,
+  isCurrentMatch,
+  onStartDrag,
+  onStartEdit,
+  onTextChange,
+  onTextBlur,
+}: TitleViewProps) {
+  const textRef = useRef<HTMLDivElement>(null);
+  const wrapRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const handler = (e: MouseEvent) => {
+      e.stopPropagation();
+      onStartEdit();
+    };
+    el.addEventListener("dblclick", handler);
+    return () => el.removeEventListener("dblclick", handler);
+  }, [onStartEdit]);
+
+  useEffect(() => {
+    if (editing && textRef.current) {
+      textRef.current.focus();
+      const sel = window.getSelection();
+      const range = document.createRange();
+      range.selectNodeContents(textRef.current);
+      range.collapse(false);
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+    }
+  }, [editing]);
+
+  useEffect(() => {
+    if (
+      textRef.current &&
+      document.activeElement !== textRef.current &&
+      textRef.current.textContent !== title.text
+    ) {
+      textRef.current.textContent = title.text;
+    }
+  }, [title.text]);
+
+  return (
+    <div
+      ref={wrapRef}
+      data-node-kind="title"
+      data-id={title.id}
+      className={`flow-title${selected ? " is-selected" : ""}${
+        editing ? " is-editing" : ""
+      }${matched ? " is-match" : ""}${isCurrentMatch ? " is-current-match" : ""}`}
+      style={{
+        left: title.x,
+        top: title.y,
+        width: title.w,
+        minHeight: title.h,
+      }}
+      onMouseDown={onStartDrag}
+    >
+      <div
+        ref={textRef}
+        className="flow-title-text"
+        contentEditable={editing}
+        suppressContentEditableWarning
+        spellCheck={false}
+        data-placeholder="Title"
+        onBlur={(e) => onTextBlur(e.currentTarget.textContent || "")}
+        onInput={(e) => onTextChange(e.currentTarget.textContent || "")}
+        onMouseDown={(e) => {
+          if (editing) e.stopPropagation();
+        }}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            (e.currentTarget as HTMLDivElement).blur();
+          }
+        }}
       />
     </div>
   );
