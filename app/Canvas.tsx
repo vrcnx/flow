@@ -17,9 +17,14 @@ type HandlerBag = {
 declare global {
   interface Window {
     __flowHandlers?: HandlerBag;
-    __flowAttached?: boolean;
+    __flowAttachVersion?: number;
+    __flowDetach?: () => void;
   }
 }
+
+// Bump this whenever the listener set changes — forces previous-build
+// listeners (from HMR) to be torn down so the new set takes effect cleanly.
+const ATTACH_VERSION = 3;
 
 type Block = {
   id: string;
@@ -506,6 +511,67 @@ export default function Canvas() {
 
   // ───────────────  Save manager actions  ───────────────
 
+  const exportDoc = () => {
+    try {
+      const json = JSON.stringify(docRef.current, null, 2);
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      const stamp = new Date().toISOString().slice(0, 10);
+      a.download = `flow-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      // Defer revoke so the download triggers reliably first.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) {
+      console.warn("[flow] export failed", err);
+    }
+  };
+
+  const importDoc = () => {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json,.json";
+    input.style.display = "none";
+    input.onchange = () => {
+      const file = input.files?.[0];
+      input.remove();
+      if (!file) return;
+      file
+        .text()
+        .then((text) => {
+          let parsed: Doc | null = null;
+          try {
+            parsed = looseDocValidate(JSON.parse(text));
+          } catch {
+            parsed = null;
+          }
+          if (!parsed) {
+            window.alert("That file doesn't look like a flow JSON.");
+            return;
+          }
+          setDoc(parsed);
+          setSelection(null);
+          setEditingId(null);
+          setSearch({ open: false, query: "", index: 0 });
+          commitHistory();
+          const el = canvasRef.current;
+          if (el) {
+            const rect = el.getBoundingClientRect();
+            setView({ x: rect.width / 2, y: rect.height / 2, scale: 1 });
+          }
+        })
+        .catch((err) => {
+          console.warn("[flow] import failed", err);
+          window.alert("Failed to read that file.");
+        });
+    };
+    document.body.appendChild(input);
+    input.click();
+  };
+
   const saveSnapshot = (rawName: string) => {
     const name = rawName.trim();
     if (!name) return;
@@ -917,18 +983,41 @@ export default function Canvas() {
   }
 
   useEffect(() => {
-    if (window.__flowAttached) return;
-    window.__flowAttached = true;
+    if (window.__flowAttachVersion === ATTACH_VERSION) return;
+    // Tear down any previous-version listeners before attaching this set.
+    window.__flowDetach?.();
+
     const proxy =
       <T extends Event>(name: keyof HandlerBag) =>
       ((e: T) => window.__flowHandlers?.[name]?.(e as never)) as EventListener;
-    document.addEventListener("mousedown", proxy("down"));
-    document.addEventListener("dblclick", proxy("dbl"));
-    document.addEventListener("wheel", proxy("wheel"), { passive: false });
-    document.addEventListener("contextmenu", proxy("ctx"));
-    window.addEventListener("mousemove", proxy("move"));
-    window.addEventListener("mouseup", proxy("up"));
-    window.addEventListener("keydown", proxy("key"));
+    const downP = proxy<MouseEvent>("down");
+    const dblP = proxy<MouseEvent>("dbl");
+    const wheelP = proxy<WheelEvent>("wheel");
+    const ctxP = proxy<MouseEvent>("ctx");
+    const moveP = proxy<MouseEvent>("move");
+    const upP = proxy<MouseEvent>("up");
+    const keyP = proxy<KeyboardEvent>("key");
+
+    document.addEventListener("mousedown", downP);
+    document.addEventListener("dblclick", dblP);
+    document.addEventListener("wheel", wheelP, { passive: false });
+    document.addEventListener("contextmenu", ctxP);
+    window.addEventListener("mousemove", moveP);
+    window.addEventListener("mouseup", upP);
+    window.addEventListener("keydown", keyP);
+
+    window.__flowAttachVersion = ATTACH_VERSION;
+    window.__flowDetach = () => {
+      document.removeEventListener("mousedown", downP);
+      document.removeEventListener("dblclick", dblP);
+      document.removeEventListener("wheel", wheelP);
+      document.removeEventListener("contextmenu", ctxP);
+      window.removeEventListener("mousemove", moveP);
+      window.removeEventListener("mouseup", upP);
+      window.removeEventListener("keydown", keyP);
+      delete window.__flowAttachVersion;
+      delete window.__flowDetach;
+    };
   }, []);
 
   // ───────────────  React-side per-node handlers  ───────────────
@@ -1242,6 +1331,8 @@ export default function Canvas() {
           onSave={(name) => saveSnapshot(name)}
           onLoad={(name) => loadSnapshot(name)}
           onDelete={(name) => deleteSnapshot(name)}
+          onExport={exportDoc}
+          onImport={importDoc}
           onClose={() => setManagerOpen(false)}
         />
       )}
@@ -1506,10 +1597,20 @@ type SaveManagerProps = {
   onSave: (name: string) => void;
   onLoad: (name: string) => void;
   onDelete: (name: string) => void;
+  onExport: () => void;
+  onImport: () => void;
   onClose: () => void;
 };
 
-function SaveManager({ snapshots, onSave, onLoad, onDelete, onClose }: SaveManagerProps) {
+function SaveManager({
+  snapshots,
+  onSave,
+  onLoad,
+  onDelete,
+  onExport,
+  onImport,
+  onClose,
+}: SaveManagerProps) {
   const [name, setName] = useState("");
   const names = Object.keys(snapshots).sort((a, b) => a.localeCompare(b));
 
@@ -1589,6 +1690,34 @@ function SaveManager({ snapshots, onSave, onLoad, onDelete, onClose }: SaveManag
           disabled={!name.trim()}
         >
           Save
+        </button>
+      </div>
+      <div className="flow-manager-io">
+        <button
+          type="button"
+          className="flow-manager-io-btn"
+          onClick={onImport}
+          title="Import a flow from a JSON file"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden>
+            <path d="M12 4v12" />
+            <path d="M7 11l5 5 5-5" />
+            <path d="M4 20h16" />
+          </svg>
+          <span>Import</span>
+        </button>
+        <button
+          type="button"
+          className="flow-manager-io-btn"
+          onClick={onExport}
+          title="Download the current flow as JSON"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden>
+            <path d="M12 20V8" />
+            <path d="M7 13l5-5 5 5" />
+            <path d="M4 4h16" />
+          </svg>
+          <span>Export</span>
         </button>
       </div>
       <div className="flow-manager-foot">Auto-saved to this browser</div>
