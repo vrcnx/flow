@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useMemo } from "react";
 
 // Shared handler bag — listeners are attached once and call into the latest
 // handlers via this object, so they survive any component remounts.
@@ -32,6 +32,7 @@ type Edge = { id: string; from: string; to: string };
 type Doc = { blocks: Block[]; edges: Edge[] };
 type View = { x: number; y: number; scale: number };
 type Selection = { type: "block" | "edge"; id: string } | null;
+type SearchState = { open: boolean; query: string; index: number };
 
 const GRID = 24;
 const BLOCK_W = 168; // 7 grid cells
@@ -39,6 +40,8 @@ const BLOCK_H = 72; // 3 grid cells
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 3;
 const HISTORY_LIMIT = 200;
+const STORAGE_CURRENT = "flow:current";
+const STORAGE_SNAPSHOTS = "flow:snapshots";
 
 const EMPTY_DOC: Doc = { blocks: [], edges: [] };
 
@@ -53,6 +56,21 @@ function snap(p: number) {
 function edgePath(x1: number, y1: number, x2: number, y2: number) {
   const dx = Math.max(Math.abs(x2 - x1) * 0.5, 40);
   return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+}
+
+function isExternalInputFocused() {
+  const ae = document.activeElement;
+  if (ae instanceof HTMLInputElement || ae instanceof HTMLTextAreaElement) return true;
+  // Treat block contentEditable separately from save manager / search input
+  if (ae instanceof HTMLElement && ae.isContentEditable) return false;
+  return false;
+}
+
+function looseDocValidate(value: unknown): Doc | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as { blocks?: unknown; edges?: unknown };
+  if (!Array.isArray(v.blocks) || !Array.isArray(v.edges)) return null;
+  return { blocks: v.blocks as Block[], edges: v.edges as Edge[] };
 }
 
 type Interaction =
@@ -86,12 +104,16 @@ export default function Canvas() {
     worldY: number;
   } | null>(null);
   const [panning, setPanning] = useState(false);
+  const [search, setSearch] = useState<SearchState>({ open: false, query: "", index: 0 });
+  const [managerOpen, setManagerOpen] = useState(false);
+  const [snapshots, setSnapshots] = useState<Record<string, Doc>>({});
   const [, setTick] = useState(0);
 
   const blocks = doc.blocks;
   const edges = doc.edges;
 
   const canvasRef = useRef<HTMLDivElement>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const viewRef = useRef(view);
   viewRef.current = view;
   const docRef = useRef(doc);
@@ -106,6 +128,7 @@ export default function Canvas() {
     index: 0,
   });
   const pendingCommitRef = useRef(false);
+  const initialLoadDoneRef = useRef(false);
 
   const refresh = () => setTick((t) => t + 1);
 
@@ -127,13 +150,10 @@ export default function Canvas() {
     }));
   };
 
-  // Mark that the next render's doc should be pushed to history.
   const commitHistory = () => {
     pendingCommitRef.current = true;
   };
 
-  // After every render, if a commit was requested and the doc actually changed
-  // since the last commit, push it onto the history stack.
   useEffect(() => {
     if (!pendingCommitRef.current) return;
     const h = historyRef.current;
@@ -178,13 +198,65 @@ export default function Canvas() {
     return { x: (sx - v.x) / v.scale, y: (sy - v.y) / v.scale };
   };
 
-  // Center on mount so blocks created near origin appear in the middle
+  // Initial mount: center view, then load saved state from localStorage.
   useEffect(() => {
     if (canvasRef.current) {
       const r = canvasRef.current.getBoundingClientRect();
       setView({ x: r.width / 2, y: r.height / 2, scale: 1 });
     }
+    try {
+      const raw = localStorage.getItem(STORAGE_CURRENT);
+      if (raw) {
+        const parsed = looseDocValidate(JSON.parse(raw));
+        if (parsed) {
+          setDoc(parsed);
+          historyRef.current = { stack: [parsed], index: 0 };
+        }
+      }
+    } catch {
+      // ignore corrupted storage
+    }
+    try {
+      const raw = localStorage.getItem(STORAGE_SNAPSHOTS);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+          const cleaned: Record<string, Doc> = {};
+          for (const [name, val] of Object.entries(parsed)) {
+            const d = looseDocValidate(val);
+            if (d) cleaned[name] = d;
+          }
+          setSnapshots(cleaned);
+        }
+      }
+    } catch {
+      // ignore
+    }
+    initialLoadDoneRef.current = true;
   }, []);
+
+  // Auto-save current doc to localStorage (debounced)
+  useEffect(() => {
+    if (!initialLoadDoneRef.current) return;
+    const id = window.setTimeout(() => {
+      try {
+        localStorage.setItem(STORAGE_CURRENT, JSON.stringify(doc));
+      } catch {
+        // quota full / private mode; nothing to do
+      }
+    }, 250);
+    return () => window.clearTimeout(id);
+  }, [doc]);
+
+  // Persist snapshots whenever they change
+  useEffect(() => {
+    if (!initialLoadDoneRef.current) return;
+    try {
+      localStorage.setItem(STORAGE_SNAPSHOTS, JSON.stringify(snapshots));
+    } catch {
+      // ignore
+    }
+  }, [snapshots]);
 
   const createBlockAtWorld = (wx: number, wy: number, focus: boolean) => {
     const id = uid();
@@ -201,13 +273,8 @@ export default function Canvas() {
     const id = uid();
     let newX = snap(block.x + block.w + GRID * 2);
     let newY = snap(block.y);
-    // Avoid stacking on top of an existing block to the right
     const cur = docRef.current.blocks;
-    while (
-      cur.some(
-        (b) => b.id !== block.id && b.x === newX && b.y === newY
-      )
-    ) {
+    while (cur.some((b) => b.id !== block.id && b.x === newX && b.y === newY)) {
       newY += BLOCK_H + GRID;
     }
     setBlocks((bs) => [
@@ -238,6 +305,15 @@ export default function Canvas() {
     setView({ x: rect.width / 2, y: rect.height / 2, scale: 1 });
   };
 
+  const clearAll = () => {
+    if (docRef.current.blocks.length === 0 && docRef.current.edges.length === 0) return;
+    setDoc(EMPTY_DOC);
+    setSelection(null);
+    setEditingId(null);
+    setSearch({ open: false, query: "", index: 0 });
+    commitHistory();
+  };
+
   const commitText = (id: string, newText: string) => {
     const cur = docRef.current.blocks.find((b) => b.id === id);
     if (!cur || cur.text === newText) return;
@@ -245,6 +321,85 @@ export default function Canvas() {
       bs.map((b) => (b.id === id ? { ...b, text: newText } : b))
     );
     commitHistory();
+  };
+
+  // Tab navigation between cards
+  const navigateBlocks = (reverse: boolean) => {
+    const wasEditing = !!editingIdRef.current;
+    const sel = selectionRef.current;
+    const list = docRef.current.blocks;
+    if (list.length === 0) return;
+    let nextIdx: number;
+    if (sel?.type === "block") {
+      const idx = list.findIndex((b) => b.id === sel.id);
+      if (idx === -1) {
+        nextIdx = reverse ? list.length - 1 : 0;
+      } else {
+        nextIdx = reverse
+          ? (idx - 1 + list.length) % list.length
+          : (idx + 1) % list.length;
+      }
+    } else {
+      nextIdx = reverse ? list.length - 1 : 0;
+    }
+    const next = list[nextIdx];
+    setSelection({ type: "block", id: next.id });
+    setEditingId(wasEditing ? next.id : null);
+    centerOn(next);
+  };
+
+  const centerOn = (block: Block) => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const v = viewRef.current;
+    setView({
+      scale: v.scale,
+      x: rect.width / 2 - (block.x + block.w / 2) * v.scale,
+      y: rect.height / 2 - (block.y + block.h / 2) * v.scale,
+    });
+  };
+
+  // Search matches and pan-to-match
+  const matches = useMemo(() => {
+    if (!search.open || !search.query.trim()) return [] as Block[];
+    const q = search.query.toLowerCase();
+    return blocks.filter((b) => b.text.toLowerCase().includes(q));
+  }, [search.open, search.query, blocks]);
+
+  const matchedIds = useMemo(() => new Set(matches.map((m) => m.id)), [matches]);
+  const currentMatch = matches.length > 0
+    ? matches[Math.min(search.index, matches.length - 1)]
+    : null;
+
+  useEffect(() => {
+    if (!search.open || !currentMatch) return;
+    centerOn(currentMatch);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentMatch?.id]);
+
+  // Save manager actions
+  const saveSnapshot = (rawName: string) => {
+    const name = rawName.trim();
+    if (!name) return;
+    setSnapshots((s) => ({ ...s, [name]: docRef.current }));
+  };
+
+  const loadSnapshot = (name: string) => {
+    const s = snapshots[name];
+    if (!s) return;
+    setDoc(s);
+    setSelection(null);
+    setEditingId(null);
+    commitHistory();
+  };
+
+  const deleteSnapshot = (name: string) => {
+    setSnapshots((s) => {
+      const next = { ...s };
+      delete next[name];
+      return next;
+    });
   };
 
   const handlers: HandlerBag = {
@@ -284,7 +439,9 @@ export default function Canvas() {
       const onCanvas =
         t instanceof Element &&
         !!t.closest(".flow-canvas") &&
-        !t.closest(".flow-toolbar");
+        !t.closest(".flow-toolbar") &&
+        !t.closest(".flow-search") &&
+        !t.closest(".flow-manager");
       if (!onCanvas) return;
       e.preventDefault();
       const el = canvasRef.current;
@@ -375,13 +532,31 @@ export default function Canvas() {
       }
     },
     key: (e) => {
+      const externalInput = isExternalInputFocused();
+      const editingBlock = !!editingIdRef.current;
+
+      // Ctrl/Cmd+F: open the finder (always wins, even when editing)
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "f") {
+        e.preventDefault();
+        setSearch((s) => ({ ...s, open: true }));
+        queueMicrotask(() => {
+          searchInputRef.current?.focus();
+          searchInputRef.current?.select();
+        });
+        return;
+      }
+
+      // Tab / Shift+Tab: navigate cards
+      if (e.key === "Tab") {
+        if (externalInput) return; // browser handles tab inside search/manager inputs
+        e.preventDefault();
+        navigateBlocks(e.shiftKey);
+        return;
+      }
+
       // Undo
-      if (
-        (e.ctrlKey || e.metaKey) &&
-        !e.shiftKey &&
-        e.key.toLowerCase() === "z"
-      ) {
-        if (editingIdRef.current) return; // browser handles native undo in contentEditable
+      if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key.toLowerCase() === "z") {
+        if (editingBlock || externalInput) return;
         e.preventDefault();
         undo();
         return;
@@ -391,17 +566,33 @@ export default function Canvas() {
         ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z") ||
         ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y")
       ) {
-        if (editingIdRef.current) return;
+        if (editingBlock || externalInput) return;
         e.preventDefault();
         redo();
         return;
       }
+
       if (e.key === "Escape") {
+        if (search.open) {
+          setSearch({ open: false, query: "", index: 0 });
+        }
+        if (managerOpen) setManagerOpen(false);
         setEditingId(null);
         setSelection(null);
         return;
       }
-      if (editingIdRef.current) return;
+
+      // Enter on a selected block (not editing, not in input) → enter edit mode
+      if (e.key === "Enter" && !editingBlock && !externalInput) {
+        const sel = selectionRef.current;
+        if (sel?.type === "block") {
+          e.preventDefault();
+          setEditingId(sel.id);
+          return;
+        }
+      }
+
+      if (editingBlock || externalInput) return;
       if (e.key === "Delete" || e.key === "Backspace") {
         const sel = selectionRef.current;
         let changed = false;
@@ -581,6 +772,8 @@ export default function Canvas() {
             block={b}
             selected={selection?.type === "block" && selection.id === b.id}
             editing={editingId === b.id}
+            matched={matchedIds.has(b.id)}
+            isCurrentMatch={search.open && currentMatch?.id === b.id}
             onStartDrag={(e) => startBlockDrag(e, b)}
             onStartEdit={() => startEditing(b)}
             onStartConnect={(e) => startConnect(e, b)}
@@ -607,13 +800,58 @@ export default function Canvas() {
         onRedo={redo}
         onAdd={addBlockAtCenter}
         onReset={resetView}
+        onSearch={() => {
+          setSearch((s) => ({ ...s, open: true }));
+          queueMicrotask(() => {
+            searchInputRef.current?.focus();
+            searchInputRef.current?.select();
+          });
+        }}
+        onToggleManager={() => setManagerOpen((m) => !m)}
+        managerOpen={managerOpen}
+        onClear={clearAll}
       />
 
-      {blocks.length === 0 && (
+      {search.open && (
+        <SearchBar
+          inputRef={searchInputRef}
+          query={search.query}
+          matchIndex={matches.length === 0 ? 0 : Math.min(search.index, matches.length - 1)}
+          matchCount={matches.length}
+          onChange={(q) => setSearch({ open: true, query: q, index: 0 })}
+          onNext={() =>
+            setSearch((s) =>
+              matches.length === 0
+                ? s
+                : { ...s, index: (Math.min(s.index, matches.length - 1) + 1) % matches.length }
+            )
+          }
+          onPrev={() =>
+            setSearch((s) =>
+              matches.length === 0
+                ? s
+                : { ...s, index: (Math.min(s.index, matches.length - 1) - 1 + matches.length) % matches.length }
+            )
+          }
+          onClose={() => setSearch({ open: false, query: "", index: 0 })}
+        />
+      )}
+
+      {managerOpen && (
+        <SaveManager
+          snapshots={snapshots}
+          onSave={(name) => saveSnapshot(name)}
+          onLoad={(name) => loadSnapshot(name)}
+          onDelete={(name) => deleteSnapshot(name)}
+          onClose={() => setManagerOpen(false)}
+        />
+      )}
+
+      {blocks.length === 0 && !managerOpen && (
         <div className="flow-hint">
           <div className="flow-hint-main">double-click anywhere to create a block</div>
-          <div className="flow-hint-dim">hover a block, drag the dot to connect &middot; double-click the dot to extend</div>
-          <div className="flow-hint-dim">scroll to zoom &middot; drag to pan &middot; delete to remove &middot; ctrl+z to undo</div>
+          <div className="flow-hint-dim">double-click a card&rsquo;s dot to extend &middot; tab to navigate</div>
+          <div className="flow-hint-dim">ctrl+f to find &middot; ctrl+z to undo &middot; delete to remove</div>
         </div>
       )}
     </div>
@@ -627,9 +865,24 @@ type ToolbarProps = {
   onRedo: () => void;
   onAdd: () => void;
   onReset: () => void;
+  onSearch: () => void;
+  onToggleManager: () => void;
+  managerOpen: boolean;
+  onClear: () => void;
 };
 
-function Toolbar({ canUndo, canRedo, onUndo, onRedo, onAdd, onReset }: ToolbarProps) {
+function Toolbar({
+  canUndo,
+  canRedo,
+  onUndo,
+  onRedo,
+  onAdd,
+  onReset,
+  onSearch,
+  onToggleManager,
+  managerOpen,
+  onClear,
+}: ToolbarProps) {
   return (
     <div
       className="flow-toolbar"
@@ -660,6 +913,30 @@ function Toolbar({ canUndo, canRedo, onUndo, onRedo, onAdd, onReset }: ToolbarPr
           <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
         </svg>
       </ToolbarButton>
+      <div className="flow-toolbar-divider" />
+      <ToolbarButton tip="Find (Ctrl+F)" onClick={onSearch}>
+        <svg viewBox="0 0 24 24" aria-hidden>
+          <circle cx="11" cy="11" r="6.5" />
+          <path d="M20 20l-4.2-4.2" />
+        </svg>
+      </ToolbarButton>
+      <ToolbarButton
+        tip={managerOpen ? "Hide saved flows" : "Saved flows"}
+        onClick={onToggleManager}
+      >
+        <svg viewBox="0 0 24 24" aria-hidden>
+          <path d="M4 5a2 2 0 0 1 2-2h8l6 6v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5z" />
+          <path d="M14 3v6h6" />
+        </svg>
+      </ToolbarButton>
+      <ToolbarButton tip="Clear canvas" onClick={onClear}>
+        <svg viewBox="0 0 24 24" aria-hidden>
+          <path d="M4 7h16" />
+          <path d="M10 11v6M14 11v6" />
+          <path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13" />
+          <path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3" />
+        </svg>
+      </ToolbarButton>
     </div>
   );
 }
@@ -688,10 +965,196 @@ function ToolbarButton({
   );
 }
 
+type SearchBarProps = {
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  query: string;
+  matchIndex: number;
+  matchCount: number;
+  onChange: (q: string) => void;
+  onNext: () => void;
+  onPrev: () => void;
+  onClose: () => void;
+};
+
+function SearchBar({
+  inputRef,
+  query,
+  matchIndex,
+  matchCount,
+  onChange,
+  onNext,
+  onPrev,
+  onClose,
+}: SearchBarProps) {
+  return (
+    <div
+      className="flow-search"
+      onMouseDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      <svg viewBox="0 0 24 24" className="flow-search-icon" aria-hidden>
+        <circle cx="11" cy="11" r="6.5" />
+        <path d="M20 20l-4.2-4.2" />
+      </svg>
+      <input
+        ref={inputRef}
+        className="flow-search-input"
+        value={query}
+        placeholder="Find a card&hellip;"
+        spellCheck={false}
+        autoComplete="off"
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") {
+            e.preventDefault();
+            if (e.shiftKey) onPrev();
+            else onNext();
+          } else if (e.key === "Escape") {
+            e.preventDefault();
+            onClose();
+          }
+        }}
+      />
+      <span className="flow-search-count">
+        {matchCount === 0 ? "0 / 0" : `${matchIndex + 1} / ${matchCount}`}
+      </span>
+      <button
+        type="button"
+        className="flow-search-nav"
+        onClick={onPrev}
+        disabled={matchCount === 0}
+        aria-label="Previous match"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden>
+          <path d="M15 6l-6 6 6 6" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        className="flow-search-nav"
+        onClick={onNext}
+        disabled={matchCount === 0}
+        aria-label="Next match"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden>
+          <path d="M9 6l6 6-6 6" />
+        </svg>
+      </button>
+      <button
+        type="button"
+        className="flow-search-close"
+        onClick={onClose}
+        aria-label="Close search"
+      >
+        <svg viewBox="0 0 24 24" aria-hidden>
+          <path d="M6 6l12 12M6 18L18 6" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
+type SaveManagerProps = {
+  snapshots: Record<string, Doc>;
+  onSave: (name: string) => void;
+  onLoad: (name: string) => void;
+  onDelete: (name: string) => void;
+  onClose: () => void;
+};
+
+function SaveManager({ snapshots, onSave, onLoad, onDelete, onClose }: SaveManagerProps) {
+  const [name, setName] = useState("");
+  const names = Object.keys(snapshots).sort((a, b) => a.localeCompare(b));
+
+  const handleSave = () => {
+    const t = name.trim();
+    if (!t) return;
+    onSave(t);
+    setName("");
+  };
+
+  return (
+    <div
+      className="flow-manager"
+      onMouseDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      <div className="flow-manager-header">
+        <span>Saved flows</span>
+        <button
+          type="button"
+          className="flow-manager-close"
+          onClick={onClose}
+          aria-label="Close save manager"
+        >
+          <svg viewBox="0 0 24 24" aria-hidden>
+            <path d="M6 6l12 12M6 18L18 6" />
+          </svg>
+        </button>
+      </div>
+      <div className="flow-manager-list">
+        {names.length === 0 ? (
+          <div className="flow-manager-empty">No snapshots yet. Save one below.</div>
+        ) : (
+          names.map((n) => (
+            <div className="flow-manager-row" key={n}>
+              <button
+                type="button"
+                className="flow-manager-load"
+                onClick={() => onLoad(n)}
+                title="Load this flow"
+              >
+                {n}
+              </button>
+              <button
+                type="button"
+                className="flow-manager-delete"
+                onClick={() => onDelete(n)}
+                aria-label={`Delete ${n}`}
+              >
+                <svg viewBox="0 0 24 24" aria-hidden>
+                  <path d="M6 6l12 12M6 18L18 6" />
+                </svg>
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+      <div className="flow-manager-save">
+        <input
+          className="flow-manager-input"
+          value={name}
+          placeholder="Snapshot name"
+          spellCheck={false}
+          autoComplete="off"
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter") {
+              e.preventDefault();
+              handleSave();
+            }
+          }}
+        />
+        <button
+          type="button"
+          className="flow-manager-save-btn"
+          onClick={handleSave}
+          disabled={!name.trim()}
+        >
+          Save
+        </button>
+      </div>
+      <div className="flow-manager-foot">Auto-saved to this browser</div>
+    </div>
+  );
+}
+
 type BlockViewProps = {
   block: Block;
   selected: boolean;
   editing: boolean;
+  matched: boolean;
+  isCurrentMatch: boolean;
   onStartDrag: (e: React.MouseEvent) => void;
   onStartEdit: () => void;
   onStartConnect: (e: React.MouseEvent) => void;
@@ -704,6 +1167,8 @@ function BlockView({
   block,
   selected,
   editing,
+  matched,
+  isCurrentMatch,
   onStartDrag,
   onStartEdit,
   onStartConnect,
@@ -715,8 +1180,6 @@ function BlockView({
   const wrapRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<HTMLDivElement>(null);
 
-  // Native dblclick on the block body — for the same React-delegation reasons
-  // as the canvas listeners.
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -729,7 +1192,6 @@ function BlockView({
     return () => el.removeEventListener("dblclick", handler);
   }, [onStartEdit]);
 
-  // Native dblclick on the connection handle → auto-extend a new connected card.
   useEffect(() => {
     const el = handleRef.current;
     if (!el) return;
@@ -769,7 +1231,7 @@ function BlockView({
       ref={wrapRef}
       className={`flow-block${selected ? " is-selected" : ""}${
         editing ? " is-editing" : ""
-      }`}
+      }${matched ? " is-match" : ""}${isCurrentMatch ? " is-current-match" : ""}`}
       style={{
         left: block.x,
         top: block.y,
@@ -800,7 +1262,7 @@ function BlockView({
         ref={handleRef}
         className="flow-handle"
         onMouseDown={onStartConnect}
-        title="Drag to connect · double-click to extend"
+        title="Drag to connect &middot; double-click to extend"
       />
     </div>
   );

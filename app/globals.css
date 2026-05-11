@@ -222,3 +222,328 @@ body {
   border: 1px solid rgba(255, 255, 255, 0.08);
   letter-spacing: 0.02em;
 }
+
+/* ──────────────  Match highlight  ────────────── */
+
+.flow-block.is-match {
+  border-color: rgba(255, 209, 102, 0.7);
+}
+
+.flow-block.is-match .flow-block-text {
+  color: rgba(255, 224, 156, 1);
+}
+
+.flow-block.is-current-match {
+  border-color: #ffd166;
+  box-shadow: 0 0 0 2px rgba(255, 209, 102, 0.28);
+}
+
+.flow-block.is-selected.is-match {
+  border-color: #ffd166;
+}
+
+.flow-block.is-selected.is-match,
+.flow-block.is-selected.is-current-match {
+  box-shadow: 0 0 0 2px rgba(255, 209, 102, 0.35);
+}
+
+/* ──────────────  Search bar  ────────────── */
+
+.flow-search {
+  position: absolute;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px 6px 10px;
+  background: rgba(15, 15, 15, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  z-index: 20;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.flow-search-icon {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.5);
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.flow-search-input {
+  background: transparent;
+  border: none;
+  color: #ffffff;
+  outline: none;
+  width: 220px;
+  font-size: 13px;
+  font-family: inherit;
+  padding: 4px 0;
+  caret-color: #ffffff;
+}
+
+.flow-search-input::placeholder {
+  color: rgba(255, 255, 255, 0.35);
+}
+
+.flow-search-count {
+  color: rgba(255, 255, 255, 0.45);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  margin-left: 4px;
+  padding-right: 4px;
+  min-width: 40px;
+  text-align: center;
+}
+
+.flow-search-nav,
+.flow-search-close {
+  width: 24px;
+  height: 24px;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.55);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  padding: 0;
+  transition: background 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+}
+
+.flow-search-nav svg,
+.flow-search-close svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.flow-search-nav:hover:not(:disabled),
+.flow-search-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.flow-search-nav:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* ──────────────  Save manager panel  ────────────── */
+
+.flow-manager {
+  position: absolute;
+  left: 70px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 248px;
+  max-height: 360px;
+  display: flex;
+  flex-direction: column;
+  background: rgba(15, 15, 15, 0.96);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  padding: 10px 10px 8px;
+  z-index: 15;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  color: rgba(255, 255, 255, 0.85);
+  font-size: 12px;
+}
+
+.flow-manager-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.5);
+  padding: 0 2px 8px;
+}
+
+.flow-manager-close {
+  width: 20px;
+  height: 20px;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.45);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+}
+
+.flow-manager-close svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.flow-manager-close:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #ffffff;
+}
+
+.flow-manager-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 0 -4px;
+  padding: 0 4px;
+  max-height: 220px;
+}
+
+.flow-manager-list::-webkit-scrollbar {
+  width: 6px;
+}
+
+.flow-manager-list::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+
+.flow-manager-empty {
+  color: rgba(255, 255, 255, 0.35);
+  font-size: 11px;
+  padding: 12px 4px;
+  text-align: center;
+  font-style: italic;
+}
+
+.flow-manager-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.flow-manager-load {
+  flex: 1 1 auto;
+  text-align: left;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.78);
+  padding: 6px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.flow-manager-load:hover {
+  background: rgba(255, 255, 255, 0.06);
+  color: #ffffff;
+}
+
+.flow-manager-delete {
+  width: 22px;
+  height: 22px;
+  background: transparent;
+  border: none;
+  color: rgba(255, 255, 255, 0.35);
+  cursor: pointer;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.flow-manager-delete svg {
+  width: 11px;
+  height: 11px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+}
+
+.flow-manager-delete:hover {
+  background: rgba(220, 80, 80, 0.14);
+  color: rgba(255, 130, 130, 0.95);
+}
+
+.flow-manager-save {
+  display: flex;
+  gap: 4px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.flow-manager-input {
+  flex: 1 1 auto;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  color: #ffffff;
+  outline: none;
+  font-family: inherit;
+  font-size: 12px;
+  padding: 5px 8px;
+  caret-color: #ffffff;
+  transition: border-color 0.12s ease, background 0.12s ease;
+}
+
+.flow-manager-input:focus {
+  border-color: rgba(255, 255, 255, 0.2);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.flow-manager-input::placeholder {
+  color: rgba(255, 255, 255, 0.3);
+}
+
+.flow-manager-save-btn {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.85);
+  border-radius: 4px;
+  padding: 0 12px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  transition: background 0.12s ease, color 0.12s ease, opacity 0.12s ease;
+}
+
+.flow-manager-save-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+}
+
+.flow-manager-save-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.flow-manager-foot {
+  margin-top: 6px;
+  color: rgba(255, 255, 255, 0.3);
+  font-size: 10px;
+  text-align: center;
+  letter-spacing: 0.04em;
+}
