@@ -29,17 +29,25 @@ type Block = {
   text: string;
 };
 type Edge = { id: string; from: string; to: string };
+type Doc = { blocks: Block[]; edges: Edge[] };
 type View = { x: number; y: number; scale: number };
 type Selection = { type: "block" | "edge"; id: string } | null;
 
 const GRID = 24;
-const BLOCK_W = 160;
-const BLOCK_H = 60;
+const BLOCK_W = 168; // 7 grid cells
+const BLOCK_H = 72; // 3 grid cells
 const MIN_SCALE = 0.25;
 const MAX_SCALE = 3;
+const HISTORY_LIMIT = 200;
+
+const EMPTY_DOC: Doc = { blocks: [], edges: [] };
 
 function uid() {
   return Math.random().toString(36).slice(2, 10);
+}
+
+function snap(p: number) {
+  return Math.round(p / GRID) * GRID;
 }
 
 function edgePath(x1: number, y1: number, x2: number, y2: number) {
@@ -63,12 +71,12 @@ type Interaction =
       startMouseY: number;
       startBlockX: number;
       startBlockY: number;
+      moved: boolean;
     }
   | { type: "connect"; from: string };
 
 export default function Canvas() {
-  const [blocks, setBlocks] = useState<Block[]>([]);
-  const [edges, setEdges] = useState<Edge[]>([]);
+  const [doc, setDocState] = useState<Doc>(EMPTY_DOC);
   const [view, setView] = useState<View>({ x: 0, y: 0, scale: 1 });
   const [editingId, setEditingId] = useState<string | null>(null);
   const [selection, setSelection] = useState<Selection>(null);
@@ -78,26 +86,99 @@ export default function Canvas() {
     worldY: number;
   } | null>(null);
   const [panning, setPanning] = useState(false);
+  const [, setTick] = useState(0);
+
+  const blocks = doc.blocks;
+  const edges = doc.edges;
 
   const canvasRef = useRef<HTMLDivElement>(null);
-
-  // Live mirrors for use inside native event handlers
   const viewRef = useRef(view);
   viewRef.current = view;
-  const blocksRef = useRef(blocks);
-  blocksRef.current = blocks;
+  const docRef = useRef(doc);
+  docRef.current = doc;
   const editingIdRef = useRef(editingId);
   editingIdRef.current = editingId;
   const selectionRef = useRef(selection);
   selectionRef.current = selection;
   const interactionRef = useRef<Interaction>({ type: "none" });
+  const historyRef = useRef<{ stack: Doc[]; index: number }>({
+    stack: [EMPTY_DOC],
+    index: 0,
+  });
+  const pendingCommitRef = useRef(false);
+
+  const refresh = () => setTick((t) => t + 1);
+
+  const setDoc = (updater: Doc | ((d: Doc) => Doc)) => {
+    setDocState((d) => (typeof updater === "function" ? updater(d) : updater));
+  };
+
+  const setBlocks = (updater: Block[] | ((bs: Block[]) => Block[])) => {
+    setDoc((d) => ({
+      ...d,
+      blocks: typeof updater === "function" ? updater(d.blocks) : updater,
+    }));
+  };
+
+  const setEdges = (updater: Edge[] | ((es: Edge[]) => Edge[])) => {
+    setDoc((d) => ({
+      ...d,
+      edges: typeof updater === "function" ? updater(d.edges) : updater,
+    }));
+  };
+
+  // Mark that the next render's doc should be pushed to history.
+  const commitHistory = () => {
+    pendingCommitRef.current = true;
+  };
+
+  // After every render, if a commit was requested and the doc actually changed
+  // since the last commit, push it onto the history stack.
+  useEffect(() => {
+    if (!pendingCommitRef.current) return;
+    const h = historyRef.current;
+    const top = h.stack[h.index];
+    if (top === doc) {
+      pendingCommitRef.current = false;
+      return;
+    }
+    pendingCommitRef.current = false;
+    const stack = [...h.stack.slice(0, h.index + 1), doc];
+    while (stack.length > HISTORY_LIMIT) stack.shift();
+    h.stack = stack;
+    h.index = stack.length - 1;
+    refresh();
+  }, [doc]);
+
+  const undo = () => {
+    const h = historyRef.current;
+    if (h.index <= 0) return;
+    h.index -= 1;
+    pendingCommitRef.current = false;
+    setEditingId(null);
+    setDoc(h.stack[h.index]);
+    refresh();
+  };
+
+  const redo = () => {
+    const h = historyRef.current;
+    if (h.index >= h.stack.length - 1) return;
+    h.index += 1;
+    pendingCommitRef.current = false;
+    setEditingId(null);
+    setDoc(h.stack[h.index]);
+    refresh();
+  };
+
+  const canUndo = historyRef.current.index > 0;
+  const canRedo = historyRef.current.index < historyRef.current.stack.length - 1;
 
   const screenToWorld = (sx: number, sy: number) => {
     const v = viewRef.current;
     return { x: (sx - v.x) / v.scale, y: (sy - v.y) / v.scale };
   };
 
-  // Center the view on mount so blocks created near (0,0) appear in the middle
+  // Center on mount so blocks created near origin appear in the middle
   useEffect(() => {
     if (canvasRef.current) {
       const r = canvasRef.current.getBoundingClientRect();
@@ -105,8 +186,67 @@ export default function Canvas() {
     }
   }, []);
 
-  // Always-fresh handler functions — these are recreated each render so they
-  // reference the latest state setters and the latest interaction state.
+  const createBlockAtWorld = (wx: number, wy: number, focus: boolean) => {
+    const id = uid();
+    const x = snap(wx - BLOCK_W / 2);
+    const y = snap(wy - BLOCK_H / 2);
+    setBlocks((bs) => [...bs, { id, x, y, w: BLOCK_W, h: BLOCK_H, text: "" }]);
+    setSelection({ type: "block", id });
+    if (focus) setEditingId(id);
+    commitHistory();
+    return id;
+  };
+
+  const extendFrom = (block: Block) => {
+    const id = uid();
+    let newX = snap(block.x + block.w + GRID * 2);
+    let newY = snap(block.y);
+    // Avoid stacking on top of an existing block to the right
+    const cur = docRef.current.blocks;
+    while (
+      cur.some(
+        (b) => b.id !== block.id && b.x === newX && b.y === newY
+      )
+    ) {
+      newY += BLOCK_H + GRID;
+    }
+    setBlocks((bs) => [
+      ...bs,
+      { id, x: newX, y: newY, w: BLOCK_W, h: BLOCK_H, text: "" },
+    ]);
+    setEdges((es) => {
+      if (es.some((ed) => ed.from === block.id && ed.to === id)) return es;
+      return [...es, { id: uid(), from: block.id, to: id }];
+    });
+    setSelection({ type: "block", id });
+    setEditingId(id);
+    commitHistory();
+  };
+
+  const addBlockAtCenter = () => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const w = screenToWorld(rect.width / 2, rect.height / 2);
+    createBlockAtWorld(w.x, w.y, true);
+  };
+
+  const resetView = () => {
+    const el = canvasRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    setView({ x: rect.width / 2, y: rect.height / 2, scale: 1 });
+  };
+
+  const commitText = (id: string, newText: string) => {
+    const cur = docRef.current.blocks.find((b) => b.id === id);
+    if (!cur || cur.text === newText) return;
+    setBlocks((bs) =>
+      bs.map((b) => (b.id === id ? { ...b, text: newText } : b))
+    );
+    commitHistory();
+  };
+
   const handlers: HandlerBag = {
     down: (e) => {
       const t = e.target;
@@ -135,26 +275,16 @@ export default function Canvas() {
       }
       const rect = el.getBoundingClientRect();
       const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
-      const id = uid();
-      setBlocks((bs) => [
-        ...bs,
-        {
-          id,
-          x: w.x - BLOCK_W / 2,
-          y: w.y - BLOCK_H / 2,
-          w: BLOCK_W,
-          h: BLOCK_H,
-          text: "",
-        },
-      ]);
-      setSelection({ type: "block", id });
-      setEditingId(id);
+      createBlockAtWorld(w.x, w.y, true);
       interactionRef.current = { type: "none" };
       setPanning(false);
     },
     wheel: (e) => {
       const t = e.target;
-      const onCanvas = t instanceof Element && !!t.closest(".flow-canvas");
+      const onCanvas =
+        t instanceof Element &&
+        !!t.closest(".flow-canvas") &&
+        !t.closest(".flow-toolbar");
       if (!onCanvas) return;
       e.preventDefault();
       const el = canvasRef.current;
@@ -168,7 +298,11 @@ export default function Canvas() {
       if (newScale === v.scale) return;
       const wx = (mx - v.x) / v.scale;
       const wy = (my - v.y) / v.scale;
-      setView({ scale: newScale, x: mx - wx * newScale, y: my - wy * newScale });
+      setView({
+        scale: newScale,
+        x: mx - wx * newScale,
+        y: my - wy * newScale,
+      });
     },
     move: (e) => {
       const s = interactionRef.current;
@@ -182,12 +316,21 @@ export default function Canvas() {
         const scale = viewRef.current.scale;
         const dx = (e.clientX - s.startMouseX) / scale;
         const dy = (e.clientY - s.startMouseY) / scale;
+        const newX = snap(s.startBlockX + dx);
+        const newY = snap(s.startBlockY + dy);
+        const cur = docRef.current.blocks.find((b) => b.id === s.id);
+        if (!cur) return;
+        if (cur.x === newX && cur.y === newY) {
+          if (!s.moved && (Math.abs(dx) > 2 || Math.abs(dy) > 2)) {
+            interactionRef.current = { ...s, moved: true };
+          }
+          return;
+        }
+        if (!s.moved) {
+          interactionRef.current = { ...s, moved: true };
+        }
         setBlocks((bs) =>
-          bs.map((b) =>
-            b.id === s.id
-              ? { ...b, x: s.startBlockX + dx, y: s.startBlockY + dy }
-              : b
-          )
+          bs.map((b) => (b.id === s.id ? { ...b, x: newX, y: newY } : b))
         );
       } else if (s.type === "connect") {
         const rect = canvasRef.current?.getBoundingClientRect();
@@ -200,9 +343,10 @@ export default function Canvas() {
       const s = interactionRef.current;
       if (s.type === "connect") {
         const rect = canvasRef.current?.getBoundingClientRect();
+        let added = false;
         if (rect) {
           const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
-          const target = blocksRef.current.find(
+          const target = docRef.current.blocks.find(
             (b) =>
               w.x >= b.x &&
               w.x <= b.x + b.w &&
@@ -213,12 +357,17 @@ export default function Canvas() {
           if (target) {
             const fromId = s.from;
             setEdges((es) => {
-              if (es.some((ed) => ed.from === fromId && ed.to === target.id)) return es;
+              if (es.some((ed) => ed.from === fromId && ed.to === target.id))
+                return es;
               return [...es, { id: uid(), from: fromId, to: target.id }];
             });
+            added = true;
           }
         }
         setConnectPreview(null);
+        if (added) commitHistory();
+      } else if (s.type === "drag") {
+        if (s.moved) commitHistory();
       }
       if (s.type !== "none") {
         interactionRef.current = { type: "none" };
@@ -226,6 +375,27 @@ export default function Canvas() {
       }
     },
     key: (e) => {
+      // Undo
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.shiftKey &&
+        e.key.toLowerCase() === "z"
+      ) {
+        if (editingIdRef.current) return; // browser handles native undo in contentEditable
+        e.preventDefault();
+        undo();
+        return;
+      }
+      // Redo
+      if (
+        ((e.ctrlKey || e.metaKey) && e.shiftKey && e.key.toLowerCase() === "z") ||
+        ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "y")
+      ) {
+        if (editingIdRef.current) return;
+        e.preventDefault();
+        redo();
+        return;
+      }
       if (e.key === "Escape") {
         setEditingId(null);
         setSelection(null);
@@ -234,30 +404,33 @@ export default function Canvas() {
       if (editingIdRef.current) return;
       if (e.key === "Delete" || e.key === "Backspace") {
         const sel = selectionRef.current;
+        let changed = false;
         if (sel?.type === "block") {
           const id = sel.id;
           setBlocks((bs) => bs.filter((b) => b.id !== id));
           setEdges((es) => es.filter((ed) => ed.from !== id && ed.to !== id));
           setSelection(null);
+          changed = true;
         } else if (sel?.type === "edge") {
           const id = sel.id;
           setEdges((es) => es.filter((ed) => ed.id !== id));
           setSelection(null);
+          changed = true;
         }
+        if (changed) commitHistory();
       }
     },
   };
-  // Publish the latest handlers so the once-attached listeners delegate to them
+
   if (typeof window !== "undefined") {
     window.__flowHandlers = handlers;
   }
 
-  // Attach DOM listeners exactly once per page load — survives any component
-  // remount churn (Next dev tools / HMR) because we never detach.
   useEffect(() => {
     if (window.__flowAttached) return;
     window.__flowAttached = true;
-    const proxy = <T extends Event>(name: keyof HandlerBag) =>
+    const proxy =
+      <T extends Event>(name: keyof HandlerBag) =>
       ((e: T) => window.__flowHandlers?.[name]?.(e as never)) as EventListener;
     document.addEventListener("mousedown", proxy("down"));
     document.addEventListener("dblclick", proxy("dbl"));
@@ -278,11 +451,11 @@ export default function Canvas() {
       startMouseY: e.clientY,
       startBlockX: block.x,
       startBlockY: block.y,
+      moved: false,
     };
   };
 
-  const startEditing = (e: React.MouseEvent, block: Block) => {
-    e.stopPropagation();
+  const startEditing = (block: Block) => {
     setSelection({ type: "block", id: block.id });
     setEditingId(block.id);
   };
@@ -409,28 +582,109 @@ export default function Canvas() {
             selected={selection?.type === "block" && selection.id === b.id}
             editing={editingId === b.id}
             onStartDrag={(e) => startBlockDrag(e, b)}
-            onStartEdit={(e) => startEditing(e, b)}
+            onStartEdit={() => startEditing(b)}
             onStartConnect={(e) => startConnect(e, b)}
+            onExtend={() => extendFrom(b)}
             onTextChange={(t) =>
               setBlocks((bs) =>
                 bs.map((x) => (x.id === b.id ? { ...x, text: t } : x))
               )
             }
-            onTextBlur={() => setEditingId(null)}
+            onTextBlur={(finalText) => {
+              setEditingId(null);
+              commitText(b.id, finalText);
+            }}
           />
         ))}
       </div>
 
       <div className="flow-label">flow</div>
 
+      <Toolbar
+        canUndo={canUndo}
+        canRedo={canRedo}
+        onUndo={undo}
+        onRedo={redo}
+        onAdd={addBlockAtCenter}
+        onReset={resetView}
+      />
+
       {blocks.length === 0 && (
         <div className="flow-hint">
           <div className="flow-hint-main">double-click anywhere to create a block</div>
-          <div className="flow-hint-dim">hover a block, drag the dot to connect</div>
-          <div className="flow-hint-dim">scroll to zoom &middot; drag to pan &middot; delete to remove</div>
+          <div className="flow-hint-dim">hover a block, drag the dot to connect &middot; double-click the dot to extend</div>
+          <div className="flow-hint-dim">scroll to zoom &middot; drag to pan &middot; delete to remove &middot; ctrl+z to undo</div>
         </div>
       )}
     </div>
+  );
+}
+
+type ToolbarProps = {
+  canUndo: boolean;
+  canRedo: boolean;
+  onUndo: () => void;
+  onRedo: () => void;
+  onAdd: () => void;
+  onReset: () => void;
+};
+
+function Toolbar({ canUndo, canRedo, onUndo, onRedo, onAdd, onReset }: ToolbarProps) {
+  return (
+    <div
+      className="flow-toolbar"
+      onMouseDown={(e) => e.stopPropagation()}
+      onDoubleClick={(e) => e.stopPropagation()}
+    >
+      <ToolbarButton tip="Undo (Ctrl+Z)" disabled={!canUndo} onClick={onUndo}>
+        <svg viewBox="0 0 24 24" aria-hidden>
+          <path d="M9 14l-4-4 4-4" />
+          <path d="M5 10h9a5 5 0 0 1 5 5v0a5 5 0 0 1-5 5h-4" />
+        </svg>
+      </ToolbarButton>
+      <ToolbarButton tip="Redo (Ctrl+Shift+Z)" disabled={!canRedo} onClick={onRedo}>
+        <svg viewBox="0 0 24 24" aria-hidden>
+          <path d="M15 14l4-4-4-4" />
+          <path d="M19 10h-9a5 5 0 0 0-5 5v0a5 5 0 0 0 5 5h4" />
+        </svg>
+      </ToolbarButton>
+      <div className="flow-toolbar-divider" />
+      <ToolbarButton tip="Add block" onClick={onAdd}>
+        <svg viewBox="0 0 24 24" aria-hidden>
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+      </ToolbarButton>
+      <ToolbarButton tip="Reset view" onClick={onReset}>
+        <svg viewBox="0 0 24 24" aria-hidden>
+          <circle cx="12" cy="12" r="2.5" />
+          <path d="M12 2v3M12 19v3M2 12h3M19 12h3" />
+        </svg>
+      </ToolbarButton>
+    </div>
+  );
+}
+
+function ToolbarButton({
+  tip,
+  disabled,
+  onClick,
+  children,
+}: {
+  tip: string;
+  disabled?: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      data-tip={tip}
+      disabled={disabled}
+      onClick={onClick}
+      className="flow-toolbar-button"
+    >
+      {children}
+    </button>
   );
 }
 
@@ -439,10 +693,11 @@ type BlockViewProps = {
   selected: boolean;
   editing: boolean;
   onStartDrag: (e: React.MouseEvent) => void;
-  onStartEdit: (e: React.MouseEvent) => void;
+  onStartEdit: () => void;
   onStartConnect: (e: React.MouseEvent) => void;
+  onExtend: () => void;
   onTextChange: (t: string) => void;
-  onTextBlur: () => void;
+  onTextBlur: (finalText: string) => void;
 };
 
 function BlockView({
@@ -452,30 +707,47 @@ function BlockView({
   onStartDrag,
   onStartEdit,
   onStartConnect,
+  onExtend,
   onTextChange,
   onTextBlur,
 }: BlockViewProps) {
-  const ref = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLDivElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
+  const handleRef = useRef<HTMLDivElement>(null);
 
-  // Native dblclick on the block — for the same React-delegation reasons as the canvas
+  // Native dblclick on the block body — for the same React-delegation reasons
+  // as the canvas listeners.
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
     const handler = (e: MouseEvent) => {
+      if (e.target instanceof Element && e.target.closest(".flow-handle")) return;
       e.stopPropagation();
-      onStartEdit(e as unknown as React.MouseEvent);
+      onStartEdit();
     };
     el.addEventListener("dblclick", handler);
     return () => el.removeEventListener("dblclick", handler);
   }, [onStartEdit]);
 
+  // Native dblclick on the connection handle → auto-extend a new connected card.
   useEffect(() => {
-    if (editing && ref.current) {
-      ref.current.focus();
+    const el = handleRef.current;
+    if (!el) return;
+    const handler = (e: MouseEvent) => {
+      e.stopPropagation();
+      e.preventDefault();
+      onExtend();
+    };
+    el.addEventListener("dblclick", handler);
+    return () => el.removeEventListener("dblclick", handler);
+  }, [onExtend]);
+
+  useEffect(() => {
+    if (editing && textRef.current) {
+      textRef.current.focus();
       const sel = window.getSelection();
       const range = document.createRange();
-      range.selectNodeContents(ref.current);
+      range.selectNodeContents(textRef.current);
       range.collapse(false);
       sel?.removeAllRanges();
       sel?.addRange(range);
@@ -484,11 +756,11 @@ function BlockView({
 
   useEffect(() => {
     if (
-      ref.current &&
-      document.activeElement !== ref.current &&
-      ref.current.textContent !== block.text
+      textRef.current &&
+      document.activeElement !== textRef.current &&
+      textRef.current.textContent !== block.text
     ) {
-      ref.current.textContent = block.text;
+      textRef.current.textContent = block.text;
     }
   }, [block.text]);
 
@@ -507,15 +779,12 @@ function BlockView({
       onMouseDown={onStartDrag}
     >
       <div
-        ref={ref}
+        ref={textRef}
         className="flow-block-text"
         contentEditable={editing}
         suppressContentEditableWarning
         spellCheck={false}
-        onBlur={(e) => {
-          onTextChange(e.currentTarget.textContent || "");
-          onTextBlur();
-        }}
+        onBlur={(e) => onTextBlur(e.currentTarget.textContent || "")}
         onInput={(e) => onTextChange(e.currentTarget.textContent || "")}
         onMouseDown={(e) => {
           if (editing) e.stopPropagation();
@@ -528,9 +797,10 @@ function BlockView({
         }}
       />
       <div
+        ref={handleRef}
         className="flow-handle"
         onMouseDown={onStartConnect}
-        title="Drag to connect"
+        title="Drag to connect · double-click to extend"
       />
     </div>
   );
