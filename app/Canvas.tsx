@@ -91,7 +91,12 @@ type Interaction =
       startBlockY: number;
       moved: boolean;
     }
-  | { type: "connect"; from: string };
+  | {
+      type: "connect";
+      from: string;
+      startMouseX: number;
+      startMouseY: number;
+    };
 
 export default function Canvas() {
   const [doc, setDocState] = useState<Doc>(EMPTY_DOC);
@@ -500,7 +505,8 @@ export default function Canvas() {
       const s = interactionRef.current;
       if (s.type === "connect") {
         const rect = canvasRef.current?.getBoundingClientRect();
-        let added = false;
+        let changed = false;
+        const fromId = s.from;
         if (rect) {
           const w = screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
           const target = docRef.current.blocks.find(
@@ -509,20 +515,48 @@ export default function Canvas() {
               w.x <= b.x + b.w &&
               w.y >= b.y &&
               w.y <= b.y + b.h &&
-              b.id !== s.from
+              b.id !== fromId
           );
           if (target) {
-            const fromId = s.from;
             setEdges((es) => {
               if (es.some((ed) => ed.from === fromId && ed.to === target.id))
                 return es;
               return [...es, { id: uid(), from: fromId, to: target.id }];
             });
-            added = true;
+            changed = true;
+          } else {
+            // Drop on empty space → if the user actually dragged, spawn a
+            // new card at the drop location and wire it up.
+            const source = docRef.current.blocks.find((b) => b.id === fromId);
+            const overSource =
+              !!source &&
+              w.x >= source.x &&
+              w.x <= source.x + source.w &&
+              w.y >= source.y &&
+              w.y <= source.y + source.h;
+            const ddx = e.clientX - s.startMouseX;
+            const ddy = e.clientY - s.startMouseY;
+            const draggedEnough = ddx * ddx + ddy * ddy > 20 * 20;
+            if (source && !overSource && draggedEnough) {
+              const newId = uid();
+              const newX = snap(w.x - BLOCK_W / 2);
+              const newY = snap(w.y - BLOCK_H / 2);
+              setBlocks((bs) => [
+                ...bs,
+                { id: newId, x: newX, y: newY, w: BLOCK_W, h: BLOCK_H, text: "" },
+              ]);
+              setEdges((es) => [
+                ...es,
+                { id: uid(), from: fromId, to: newId },
+              ]);
+              setSelection({ type: "block", id: newId });
+              setEditingId(newId);
+              changed = true;
+            }
           }
         }
         setConnectPreview(null);
-        if (added) commitHistory();
+        if (changed) commitHistory();
       } else if (s.type === "drag") {
         if (s.moved) commitHistory();
       }
@@ -654,7 +688,12 @@ export default function Canvas() {
   const startConnect = (e: React.MouseEvent, block: Block) => {
     e.stopPropagation();
     setSelection({ type: "block", id: block.id });
-    interactionRef.current = { type: "connect", from: block.id };
+    interactionRef.current = {
+      type: "connect",
+      from: block.id,
+      startMouseX: e.clientX,
+      startMouseY: e.clientY,
+    };
     setConnectPreview({
       from: block.id,
       worldX: block.x + block.w,
@@ -746,15 +785,63 @@ export default function Canvas() {
               if (!from) return null;
               const x1 = from.x + from.w;
               const y1 = from.y + from.h / 2;
+              const wx = connectPreview.worldX;
+              const wy = connectPreview.worldY;
+
+              const overTarget = blocks.find(
+                (b) =>
+                  b.id !== connectPreview.from &&
+                  wx >= b.x &&
+                  wx <= b.x + b.w &&
+                  wy >= b.y &&
+                  wy <= b.y + b.h
+              );
+              const overSource =
+                wx >= from.x &&
+                wx <= from.x + from.w &&
+                wy >= from.y &&
+                wy <= from.y + from.h;
+
+              let lineEndX = wx;
+              let lineEndY = wy;
+              let ghost: { x: number; y: number } | null = null;
+              if (!overTarget && !overSource) {
+                const dx = wx - x1;
+                const dy = wy - y1;
+                if (dx * dx + dy * dy > (BLOCK_W * 0.3) * (BLOCK_W * 0.3)) {
+                  const gx = snap(wx - BLOCK_W / 2);
+                  const gy = snap(wy - BLOCK_H / 2);
+                  ghost = { x: gx, y: gy };
+                  lineEndX = gx;
+                  lineEndY = gy + BLOCK_H / 2;
+                }
+              }
+
               return (
-                <path
-                  d={edgePath(x1, y1, connectPreview.worldX, connectPreview.worldY)}
-                  stroke="#ffffff"
-                  strokeOpacity={0.8}
-                  strokeWidth={1.5 / view.scale}
-                  strokeDasharray={`${6 / view.scale} ${4 / view.scale}`}
-                  fill="none"
-                />
+                <g>
+                  <path
+                    d={edgePath(x1, y1, lineEndX, lineEndY)}
+                    stroke="#ffffff"
+                    strokeOpacity={0.8}
+                    strokeWidth={1.5 / view.scale}
+                    strokeDasharray={`${6 / view.scale} ${4 / view.scale}`}
+                    fill="none"
+                  />
+                  {ghost && (
+                    <rect
+                      x={ghost.x}
+                      y={ghost.y}
+                      width={BLOCK_W}
+                      height={BLOCK_H}
+                      rx={6}
+                      fill="rgba(255, 255, 255, 0.02)"
+                      stroke="#ffffff"
+                      strokeOpacity={0.4}
+                      strokeWidth={1.5 / view.scale}
+                      strokeDasharray={`${5 / view.scale} ${4 / view.scale}`}
+                    />
+                  )}
+                </g>
               );
             })()}
         </g>
@@ -850,8 +937,8 @@ export default function Canvas() {
       {blocks.length === 0 && !managerOpen && (
         <div className="flow-hint">
           <div className="flow-hint-main">double-click anywhere to create a block</div>
-          <div className="flow-hint-dim">double-click a card&rsquo;s dot to extend &middot; tab to navigate</div>
-          <div className="flow-hint-dim">ctrl+f to find &middot; ctrl+z to undo &middot; delete to remove</div>
+          <div className="flow-hint-dim">drag from a card&rsquo;s dot to connect &middot; drop on empty space for a new card</div>
+          <div className="flow-hint-dim">tab to navigate &middot; ctrl+f to find &middot; ctrl+z to undo</div>
         </div>
       )}
     </div>
