@@ -111,9 +111,6 @@ body {
 
 .flow-handle {
   position: absolute;
-  right: -7px;
-  top: 50%;
-  transform: translateY(-50%);
   width: 12px;
   height: 12px;
   border-radius: 50%;
@@ -121,7 +118,32 @@ body {
   background-color: #0a0a0a;
   cursor: crosshair;
   opacity: 0;
-  transition: opacity 0.12s ease, transform 0.12s ease;
+  transition: opacity 0.12s ease, transform 0.12s ease,
+    background-color 0.12s ease;
+}
+
+.flow-handle.is-right {
+  right: -6px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.flow-handle.is-left {
+  left: -6px;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.flow-handle.is-top {
+  top: -6px;
+  left: 50%;
+  transform: translateX(-50%);
+}
+
+.flow-handle.is-bottom {
+  bottom: -6px;
+  left: 50%;
+  transform: translateX(-50%);
 }
 
 .flow-block:hover .flow-handle,
@@ -130,8 +152,20 @@ body {
 }
 
 .flow-handle:hover {
-  transform: translateY(-50%) scale(1.2);
   background-color: #ffffff;
+}
+
+.flow-handle.is-right:hover {
+  transform: translateY(-50%) scale(1.25);
+}
+.flow-handle.is-left:hover {
+  transform: translateY(-50%) scale(1.25);
+}
+.flow-handle.is-top:hover {
+  transform: translateX(-50%) scale(1.25);
+}
+.flow-handle.is-bottom:hover {
+  transform: translateX(-50%) scale(1.25);
 }
 
 .flow-toolbar {

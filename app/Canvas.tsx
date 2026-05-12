@@ -42,8 +42,17 @@ type Title = {
   h: number;
   text: string;
 };
-type Edge = { id: string; from: string; to: string };
+type Side = "top" | "right" | "bottom" | "left";
+type Edge = {
+  id: string;
+  from: string;
+  to: string;
+  fromSide?: Side;
+  toSide?: Side;
+};
 type Doc = { blocks: Block[]; edges: Edge[]; titles: Title[] };
+
+const SIDES: readonly Side[] = ["top", "right", "bottom", "left"];
 type View = { x: number; y: number; scale: number };
 type Selection = { type: "block" | "edge" | "title"; id: string } | null;
 type SearchState = { open: boolean; query: string; index: number };
@@ -75,9 +84,57 @@ function snap(p: number) {
   return Math.round(p / GRID) * GRID;
 }
 
-function edgePath(x1: number, y1: number, x2: number, y2: number) {
-  const dx = Math.max(Math.abs(x2 - x1) * 0.5, 40);
-  return `M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`;
+function sideDir(side: Side): [number, number] {
+  if (side === "right") return [1, 0];
+  if (side === "left") return [-1, 0];
+  if (side === "top") return [0, -1];
+  return [0, 1]; // bottom
+}
+
+function oppositeSide(side: Side): Side {
+  if (side === "right") return "left";
+  if (side === "left") return "right";
+  if (side === "top") return "bottom";
+  return "top";
+}
+
+function sideAnchor(
+  b: { x: number; y: number; w: number; h: number },
+  side: Side
+) {
+  if (side === "right") return { x: b.x + b.w, y: b.y + b.h / 2 };
+  if (side === "left") return { x: b.x, y: b.y + b.h / 2 };
+  if (side === "top") return { x: b.x + b.w / 2, y: b.y };
+  return { x: b.x + b.w / 2, y: b.y + b.h };
+}
+
+function nearestSide(
+  b: { x: number; y: number; w: number; h: number },
+  fromX: number,
+  fromY: number
+): Side {
+  const cx = b.x + b.w / 2;
+  const cy = b.y + b.h / 2;
+  const dx = fromX - cx;
+  const dy = fromY - cy;
+  if (Math.abs(dx) >= Math.abs(dy)) return dx >= 0 ? "right" : "left";
+  return dy >= 0 ? "bottom" : "top";
+}
+
+function edgePathSided(
+  x1: number,
+  y1: number,
+  side1: Side,
+  x2: number,
+  y2: number,
+  side2: Side
+) {
+  const [dx1, dy1] = sideDir(side1);
+  const [dx2, dy2] = sideDir(side2);
+  const sep = Math.max(40, Math.hypot(x2 - x1, y2 - y1) * 0.4);
+  return `M ${x1} ${y1} C ${x1 + dx1 * sep} ${y1 + dy1 * sep}, ${
+    x2 + dx2 * sep
+  } ${y2 + dy2 * sep}, ${x2} ${y2}`;
 }
 
 function isExternalInputFocused() {
@@ -119,6 +176,7 @@ type Interaction =
   | {
       type: "connect";
       from: string;
+      fromSide: Side;
       startMouseX: number;
       startMouseY: number;
     };
@@ -130,6 +188,7 @@ export default function Canvas() {
   const [selection, setSelection] = useState<Selection>(null);
   const [connectPreview, setConnectPreview] = useState<{
     from: string;
+    fromSide: Side;
     worldX: number;
     worldY: number;
   } | null>(null);
@@ -328,13 +387,34 @@ export default function Canvas() {
     return id;
   };
 
-  const extendFrom = (block: Block) => {
+  const extendFrom = (block: Block, side: Side = "right") => {
     const id = uid();
-    let newX = snap(block.x + block.w + GRID * 2);
-    let newY = snap(block.y);
+    const offset = GRID * 2;
+    let newX: number;
+    let newY: number;
+    if (side === "right") {
+      newX = snap(block.x + block.w + offset);
+      newY = snap(block.y);
+    } else if (side === "left") {
+      newX = snap(block.x - BLOCK_W - offset);
+      newY = snap(block.y);
+    } else if (side === "top") {
+      newX = snap(block.x);
+      newY = snap(block.y - BLOCK_H - offset);
+    } else {
+      newX = snap(block.x);
+      newY = snap(block.y + block.h + offset);
+    }
+    // Avoid stacking onto an existing card at the same snapped position.
     const cur = docRef.current.blocks;
-    while (cur.some((b) => b.id !== block.id && b.x === newX && b.y === newY)) {
-      newY += BLOCK_H + GRID;
+    while (
+      cur.some((b) => b.id !== block.id && b.x === newX && b.y === newY)
+    ) {
+      if (side === "top" || side === "bottom") {
+        newX += BLOCK_W + GRID;
+      } else {
+        newY += BLOCK_H + GRID;
+      }
     }
     setBlocks((bs) => [
       ...bs,
@@ -342,7 +422,7 @@ export default function Canvas() {
     ]);
     setEdges((es) => {
       if (es.some((ed) => ed.from === block.id && ed.to === id)) return es;
-      return [...es, { id: uid(), from: block.id, to: id }];
+      return [...es, { id: uid(), from: block.id, to: id, fromSide: side }];
     });
     setSelection({ type: "block", id });
     setEditingId(id);
@@ -842,7 +922,12 @@ export default function Canvas() {
         }
       } else if (s.type === "connect") {
         const w = eventToWorld(e);
-        setConnectPreview({ from: s.from, worldX: w.x, worldY: w.y });
+        setConnectPreview({
+          from: s.from,
+          fromSide: s.fromSide,
+          worldX: w.x,
+          worldY: w.y,
+        });
       }
     },
     up: (e) => {
@@ -863,7 +948,15 @@ export default function Canvas() {
           setEdges((es) => {
             if (es.some((ed) => ed.from === fromId && ed.to === target.id))
               return es;
-            return [...es, { id: uid(), from: fromId, to: target.id }];
+            return [
+              ...es,
+              {
+                id: uid(),
+                from: fromId,
+                to: target.id,
+                fromSide: s.fromSide,
+              },
+            ];
           });
           changed = true;
         } else {
@@ -887,7 +980,7 @@ export default function Canvas() {
             ]);
             setEdges((es) => [
               ...es,
-              { id: uid(), from: fromId, to: newId },
+              { id: uid(), from: fromId, to: newId, fromSide: s.fromSide },
             ]);
             setSelection({ type: "block", id: newId });
             setEditingId(newId);
@@ -1064,19 +1157,22 @@ export default function Canvas() {
     setEditingId(title.id);
   };
 
-  const startConnect = (e: React.MouseEvent, block: Block) => {
+  const startConnect = (e: React.MouseEvent, block: Block, side: Side) => {
     e.stopPropagation();
     setSelection({ type: "block", id: block.id });
     interactionRef.current = {
       type: "connect",
       from: block.id,
+      fromSide: side,
       startMouseX: e.clientX,
       startMouseY: e.clientY,
     };
+    const a = sideAnchor(block, side);
     setConnectPreview({
       from: block.id,
-      worldX: block.x + block.w,
-      worldY: block.y + block.h / 2,
+      fromSide: side,
+      worldX: a.x,
+      worldY: a.y,
     });
   };
 
@@ -1128,13 +1224,21 @@ export default function Canvas() {
             const from = blocks.find((b) => b.id === edge.from);
             const to = blocks.find((b) => b.id === edge.to);
             if (!from || !to) return null;
-            const x1 = from.x + from.w;
-            const y1 = from.y + from.h / 2;
-            const x2 = to.x;
-            const y2 = to.y + to.h / 2;
+            const fromSide: Side = edge.fromSide || "right";
+            const fromA = sideAnchor(from, fromSide);
+            const toSide: Side =
+              edge.toSide || nearestSide(to, fromA.x, fromA.y);
+            const toA = sideAnchor(to, toSide);
             const isSelected =
               selection?.type === "edge" && selection.id === edge.id;
-            const d = edgePath(x1, y1, x2, y2);
+            const d = edgePathSided(
+              fromA.x,
+              fromA.y,
+              fromSide,
+              toA.x,
+              toA.y,
+              toSide
+            );
             return (
               <g key={edge.id} data-edge-id={edge.id}>
                 <path
@@ -1163,8 +1267,10 @@ export default function Canvas() {
             (() => {
               const from = blocks.find((b) => b.id === connectPreview.from);
               if (!from) return null;
-              const x1 = from.x + from.w;
-              const y1 = from.y + from.h / 2;
+              const fromSide = connectPreview.fromSide;
+              const fromA = sideAnchor(from, fromSide);
+              const x1 = fromA.x;
+              const y1 = fromA.y;
               const wx = connectPreview.worldX;
               const wy = connectPreview.worldY;
 
@@ -1184,23 +1290,42 @@ export default function Canvas() {
 
               let lineEndX = wx;
               let lineEndY = wy;
+              let lineEndSide: Side = oppositeSide(fromSide);
               let ghost: { x: number; y: number } | null = null;
-              if (!overTarget && !overSource) {
+
+              if (overTarget) {
+                const tSide = nearestSide(overTarget, x1, y1);
+                const tA = sideAnchor(overTarget, tSide);
+                lineEndX = tA.x;
+                lineEndY = tA.y;
+                lineEndSide = tSide;
+              } else if (!overSource) {
                 const dx = wx - x1;
                 const dy = wy - y1;
                 if (dx * dx + dy * dy > (BLOCK_W * 0.3) * (BLOCK_W * 0.3)) {
                   const gx = snap(wx - BLOCK_W / 2);
                   const gy = snap(wy - BLOCK_H / 2);
+                  const gBlock = { x: gx, y: gy, w: BLOCK_W, h: BLOCK_H };
+                  const gSide = nearestSide(gBlock, x1, y1);
+                  const gA = sideAnchor(gBlock, gSide);
                   ghost = { x: gx, y: gy };
-                  lineEndX = gx;
-                  lineEndY = gy + BLOCK_H / 2;
+                  lineEndX = gA.x;
+                  lineEndY = gA.y;
+                  lineEndSide = gSide;
                 }
               }
 
               return (
                 <g>
                   <path
-                    d={edgePath(x1, y1, lineEndX, lineEndY)}
+                    d={edgePathSided(
+                      x1,
+                      y1,
+                      fromSide,
+                      lineEndX,
+                      lineEndY,
+                      lineEndSide
+                    )}
                     stroke="#ffffff"
                     strokeOpacity={0.8}
                     strokeWidth={1.5 / view.scale}
@@ -1264,8 +1389,8 @@ export default function Canvas() {
             isCurrentMatch={search.open && currentMatch?.id === b.id}
             onStartDrag={(e) => startBlockDrag(e, b)}
             onStartEdit={() => startEditingBlock(b)}
-            onStartConnect={(e) => startConnect(e, b)}
-            onExtend={() => extendFrom(b)}
+            onStartConnect={(e, side) => startConnect(e, b, side)}
+            onExtend={(side) => extendFrom(b, side)}
             onTextChange={(t) =>
               setBlocks((bs) =>
                 bs.map((x) => (x.id === b.id ? { ...x, text: t } : x))
@@ -1733,8 +1858,8 @@ type BlockViewProps = {
   isCurrentMatch: boolean;
   onStartDrag: (e: React.MouseEvent) => void;
   onStartEdit: () => void;
-  onStartConnect: (e: React.MouseEvent) => void;
-  onExtend: () => void;
+  onStartConnect: (e: React.MouseEvent, side: Side) => void;
+  onExtend: (side: Side) => void;
   onTextChange: (t: string) => void;
   onTextBlur: (finalText: string) => void;
 };
@@ -1754,31 +1879,29 @@ function BlockView({
 }: BlockViewProps) {
   const textRef = useRef<HTMLDivElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const handleRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
     const handler = (e: MouseEvent) => {
-      if (e.target instanceof Element && e.target.closest(".flow-handle")) return;
+      if (e.target instanceof Element) {
+        const h = e.target.closest(".flow-handle");
+        if (h) {
+          const side = h.getAttribute("data-side") as Side | null;
+          if (side) {
+            e.stopPropagation();
+            e.preventDefault();
+            onExtend(side);
+            return;
+          }
+        }
+      }
       e.stopPropagation();
       onStartEdit();
     };
     el.addEventListener("dblclick", handler);
     return () => el.removeEventListener("dblclick", handler);
-  }, [onStartEdit]);
-
-  useEffect(() => {
-    const el = handleRef.current;
-    if (!el) return;
-    const handler = (e: MouseEvent) => {
-      e.stopPropagation();
-      e.preventDefault();
-      onExtend();
-    };
-    el.addEventListener("dblclick", handler);
-    return () => el.removeEventListener("dblclick", handler);
-  }, [onExtend]);
+  }, [onStartEdit, onExtend]);
 
   useEffect(() => {
     if (editing && textRef.current) {
@@ -1836,12 +1959,15 @@ function BlockView({
           }
         }}
       />
-      <div
-        ref={handleRef}
-        className="flow-handle"
-        onMouseDown={onStartConnect}
-        title="Drag to connect &middot; double-click to extend"
-      />
+      {SIDES.map((side) => (
+        <div
+          key={side}
+          className={`flow-handle is-${side}`}
+          data-side={side}
+          onMouseDown={(e) => onStartConnect(e, side)}
+          title="Drag to connect &middot; double-click to extend"
+        />
+      ))}
     </div>
   );
 }
