@@ -1338,11 +1338,11 @@ export default function Canvas() {
                       y={ghost.y}
                       width={BLOCK_W}
                       height={BLOCK_H}
-                      rx={6}
-                      fill="rgba(255, 255, 255, 0.02)"
+                      rx={8}
+                      fill="rgba(26, 26, 26, 0.7)"
                       stroke="#ffffff"
-                      strokeOpacity={0.4}
-                      strokeWidth={1.5 / view.scale}
+                      strokeOpacity={0.32}
+                      strokeWidth={1.25 / view.scale}
                       strokeDasharray={`${5 / view.scale} ${4 / view.scale}`}
                     />
                   )}

@@ -70,25 +70,31 @@ body {
 
 .flow-block {
   position: absolute;
-  border: 1.5px solid rgba(255, 255, 255, 0.85);
-  border-radius: 6px;
-  background: transparent;
+  background: #1a1a1a;
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 8px;
   color: #ffffff;
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: grab;
   pointer-events: auto;
-  transition: border-color 0.12s ease, box-shadow 0.12s ease;
+  transition: border-color 0.12s ease, box-shadow 0.12s ease,
+    background 0.12s ease, transform 0.12s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5),
+    0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
 .flow-block:hover {
-  border-color: #ffffff;
+  background: #1f1f1f;
+  border-color: rgba(255, 255, 255, 0.18);
 }
 
 .flow-block.is-selected {
-  border-color: #ffffff;
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.16);
+  background: #232323;
+  border-color: rgba(255, 255, 255, 0.45);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.16),
+    0 6px 18px rgba(0, 0, 0, 0.45);
 }
 
 .flow-block.is-editing {
@@ -97,12 +103,14 @@ body {
 
 .flow-block-text {
   width: 100%;
-  padding: 8px 14px;
+  padding: 10px 14px;
   text-align: center;
   outline: none;
   color: #ffffff;
   font-size: 14px;
+  font-weight: 500;
   line-height: 1.35;
+  letter-spacing: 0.005em;
   white-space: pre-wrap;
   word-break: break-word;
   cursor: inherit;
@@ -256,7 +264,8 @@ body {
 /* ──────────────  Match highlight  ────────────── */
 
 .flow-block.is-match {
-  border-color: rgba(255, 209, 102, 0.7);
+  border-color: rgba(255, 209, 102, 0.55);
+  background: #1e1a14;
 }
 
 .flow-block.is-match .flow-block-text {
@@ -265,7 +274,9 @@ body {
 
 .flow-block.is-current-match {
   border-color: #ffd166;
-  box-shadow: 0 0 0 2px rgba(255, 209, 102, 0.28);
+  background: #251f15;
+  box-shadow: 0 0 0 2px rgba(255, 209, 102, 0.28),
+    0 6px 18px rgba(0, 0, 0, 0.45);
 }
 
 .flow-block.is-selected.is-match {
@@ -274,7 +285,8 @@ body {
 
 .flow-block.is-selected.is-match,
 .flow-block.is-selected.is-current-match {
-  box-shadow: 0 0 0 2px rgba(255, 209, 102, 0.35);
+  box-shadow: 0 0 0 2px rgba(255, 209, 102, 0.4),
+    0 6px 18px rgba(0, 0, 0, 0.5);
 }
 
 /* ──────────────  Search bar  ────────────── */
