@@ -71,7 +71,6 @@ body {
 .flow-block {
   position: absolute;
   background: #1a1a1a;
-  border: 1px solid rgba(255, 255, 255, 0.09);
   border-radius: 8px;
   color: #ffffff;
   display: flex;
@@ -79,22 +78,20 @@ body {
   justify-content: center;
   cursor: grab;
   pointer-events: auto;
-  transition: border-color 0.12s ease, box-shadow 0.12s ease,
-    background 0.12s ease, transform 0.12s ease;
+  transition: box-shadow 0.12s ease, background 0.12s ease,
+    transform 0.12s ease;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.5),
     0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
 .flow-block:hover {
   background: #1f1f1f;
-  border-color: rgba(255, 255, 255, 0.18);
 }
 
 .flow-block.is-selected {
   background: #232323;
-  border-color: rgba(255, 255, 255, 0.45);
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.16),
-    0 6px 18px rgba(0, 0, 0, 0.45);
+  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.4),
+    0 6px 18px rgba(0, 0, 0, 0.5);
 }
 
 .flow-block.is-editing {
@@ -264,8 +261,9 @@ body {
 /* ──────────────  Match highlight  ────────────── */
 
 .flow-block.is-match {
-  border-color: rgba(255, 209, 102, 0.55);
   background: #1e1a14;
+  box-shadow: 0 0 0 1.5px rgba(255, 209, 102, 0.45),
+    0 4px 12px rgba(0, 0, 0, 0.25);
 }
 
 .flow-block.is-match .flow-block-text {
@@ -273,19 +271,14 @@ body {
 }
 
 .flow-block.is-current-match {
-  border-color: #ffd166;
   background: #251f15;
-  box-shadow: 0 0 0 2px rgba(255, 209, 102, 0.28),
+  box-shadow: 0 0 0 2px rgba(255, 209, 102, 0.65),
     0 6px 18px rgba(0, 0, 0, 0.45);
-}
-
-.flow-block.is-selected.is-match {
-  border-color: #ffd166;
 }
 
 .flow-block.is-selected.is-match,
 .flow-block.is-selected.is-current-match {
-  box-shadow: 0 0 0 2px rgba(255, 209, 102, 0.4),
+  box-shadow: 0 0 0 2px rgba(255, 209, 102, 0.65),
     0 6px 18px rgba(0, 0, 0, 0.5);
 }
 
